@@ -1,0 +1,55 @@
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, JSON
+from sqlalchemy.orm import relationship
+from sqlalchemy.dialects.postgresql import UUID
+from datetime import datetime
+import uuid
+from database import Base
+
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project = Column(String(50), nullable=False)          # agencia | mesa | ticketera
+    session_id = Column(String(200), nullable=False, unique=True)
+    channel = Column(String(20), default="web")            # web | whatsapp | instagram
+    contact_name = Column(String(200))
+    contact_phone = Column(String(50))
+    contact_email = Column(String(200))
+    contact_instagram = Column(String(100))
+    status = Column(String(20), default="new")             # new | warm | hot | converted
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    messages = relationship("Message", back_populates="conversation", order_by="Message.created_at")
+    lead = relationship("Lead", back_populates="conversation", uselist=False)
+
+
+class Message(Base):
+    __tablename__ = "messages"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    conversation_id = Column(UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=False)
+    role = Column(String(20), nullable=False)               # user | assistant
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    conversation = relationship("Conversation", back_populates="messages")
+
+
+class Lead(Base):
+    __tablename__ = "leads"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    conversation_id = Column(UUID(as_uuid=True), ForeignKey("conversations.id"), unique=True)
+    project = Column(String(50), nullable=False)
+    name = Column(String(200))
+    phone = Column(String(50))
+    email = Column(String(200))
+    instagram = Column(String(100))
+    interests = Column(JSON)
+    status = Column(String(20), default="new")              # new | contacted | qualified | lost
+    notes = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    conversation = relationship("Conversation", back_populates="lead")

@@ -31,3 +31,34 @@ async def send_instagram_message(instagram_user_id: str, text: str) -> dict:
         r = await client.post(url, json=payload, headers=headers)
         r.raise_for_status()
         return r.json()
+
+
+async def get_lead_data(leadgen_id: str) -> dict:
+    """Fetch a Lead Ads submission by its leadgen_id.
+
+    Requires the `leads_retrieval` permission. Returns the raw Graph payload
+    including `field_data` (list of {name, values}).
+    """
+    url = f"{META_API_BASE}/{leadgen_id}"
+    params = {
+        "access_token": settings.meta_access_token,
+        "fields": "id,created_time,field_data,form_id,ad_id,campaign_id",
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(url, params=params)
+        r.raise_for_status()
+        return r.json()
+
+
+def parse_lead_fields(field_data: list) -> dict:
+    """Flatten Graph `field_data` into {name: first_value}.
+
+    Field names depend on the form: full_name, email, phone_number, etc.
+    """
+    out = {}
+    for field in field_data or []:
+        name = field.get("name")
+        values = field.get("values") or []
+        if name and values:
+            out[name] = values[0]
+    return out

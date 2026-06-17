@@ -8,6 +8,7 @@ from database import create_tables
 from routers.chat import router as chat_router
 from routers.webhook import router as webhook_router
 from routers.leads import router as leads_router
+from routers.ads import router as ads_router
 
 
 @asynccontextmanager
@@ -28,6 +29,7 @@ app.add_middleware(
 app.include_router(chat_router, prefix="/chat", tags=["chat"])
 app.include_router(webhook_router, prefix="/webhook", tags=["webhook"])
 app.include_router(leads_router, prefix="/leads", tags=["leads"])
+app.include_router(ads_router, prefix="/ads", tags=["ads"])
 
 app.mount("/widget", StaticFiles(directory="widget"), name="widget")
 

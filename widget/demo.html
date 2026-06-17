@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Demo — Chatbot</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      margin: 0; padding: 0; background: #f5f6f8; color: #202124;
+    }
+    .hero {
+      max-width: 720px; margin: 60px auto; padding: 0 24px; text-align: center;
+    }
+    h1 { font-size: 32px; }
+    p { color: #5f6368; line-height: 1.6; }
+    .switcher { margin-top: 32px; display: flex; gap: 12px; justify-content: center; }
+    .switcher a {
+      padding: 10px 18px; border-radius: 8px; border: 1.5px solid #dadce0;
+      text-decoration: none; color: #202124; font-weight: 500;
+    }
+    .switcher a.active { background: #1a73e8; color: #fff; border-color: #1a73e8; }
+    code { background: #e8eaed; padding: 2px 6px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <div class="hero">
+    <h1>Demo del Chatbot 💬</h1>
+    <p>
+      El widget aparece abajo a la derecha. Probá escribirle.<br />
+      Cambiá de proyecto para ver cómo cambia la personalidad del bot.
+    </p>
+    <div class="switcher">
+      <a href="?p=agencia" class="active">🚗 Agencia</a>
+      <a href="?p=mesa">📋 Mesa</a>
+      <a href="?p=ticketera">🛠️ Ticketera</a>
+    </div>
+    <p style="margin-top:40px; font-size:14px;">
+      API apuntando a <code id="api-label"></code>
+    </p>
+  </div>
+
+  <script>
+    // Lee ?p= de la URL para elegir proyecto
+    var params = new URLSearchParams(location.search);
+    var project = params.get('p') || 'agencia';
+
+    // Marca el botón activo
+    document.querySelectorAll('.switcher a').forEach(function (a) {
+      a.classList.toggle('active', a.href.indexOf('p=' + project) > -1);
+    });
+
+    // Configuración del widget (en producción esto va en cada sitio)
+    window.CHATBOT_API_URL = 'http://localhost:8000';
+    window.CHATBOT_PROJECT = project;
+    window.CHATBOT_WHATSAPP = '';      // ej: '5491100000000'
+    window.CHATBOT_INSTAGRAM = '';     // ej: 'tu_usuario_ig'
+
+    document.getElementById('api-label').textContent = window.CHATBOT_API_URL;
+  </script>
+  <script src="chatbot.js"></script>
+</body>
+</html>

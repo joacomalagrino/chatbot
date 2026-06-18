@@ -8,9 +8,14 @@ META_API_BASE = "https://graph.facebook.com/v21.0"
 async def send_whatsapp_message(phone: str, text: str) -> dict:
     url = f"{META_API_BASE}/{settings.meta_whatsapp_phone_id}/messages"
     headers = {"Authorization": f"Bearer {settings.meta_access_token}"}
+    # Normalize: strip + and spaces; Argentina mobile numbers arrive as 549xx
+    # but the test recipient list may store them as 54xx (without the 9).
+    to = phone.replace("+", "").replace(" ", "")
+    if to.startswith("549") and len(to) == 13:
+        to = "54" + to[3:]
     payload = {
         "messaging_product": "whatsapp",
-        "to": phone.replace("+", "").replace(" ", ""),
+        "to": to,
         "type": "text",
         "text": {"body": text},
     }

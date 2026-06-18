@@ -5,10 +5,10 @@ from functools import lru_cache
 class Settings(BaseSettings):
     database_url: str
     anthropic_api_key: str
-    meta_access_token: str
-    meta_verify_token: str
-    meta_whatsapp_phone_id: str
-    meta_instagram_account_id: str
+    meta_access_token: str = ""
+    meta_verify_token: str = "chatbot_verify_2024"
+    meta_whatsapp_phone_id: str = ""
+    meta_instagram_account_id: str = ""
 
     class Config:
         env_file = ".env"

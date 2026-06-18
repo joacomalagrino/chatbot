@@ -9,6 +9,9 @@ async def send_whatsapp_message(phone: str, text: str) -> dict:
     url = f"{META_API_BASE}/{settings.meta_whatsapp_phone_id}/messages"
     headers = {"Authorization": f"Bearer {settings.meta_access_token}"}
     to = phone.replace("+", "").replace(" ", "")
+    # Argentina: webhook sends 549XXXXXXXX but API list stores 5415XXXXXXXX
+    if to.startswith("549") and len(to) == 13:
+        to = "5415" + to[4:]
     payload = {
         "messaging_product": "whatsapp",
         "to": to,

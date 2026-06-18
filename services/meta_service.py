@@ -16,6 +16,9 @@ async def send_whatsapp_message(phone: str, text: str) -> dict:
     }
     async with httpx.AsyncClient(timeout=10) as client:
         r = await client.post(url, json=payload, headers=headers)
+        if not r.is_success:
+            import logging
+            logging.getLogger(__name__).error("WA send error %s: %s", r.status_code, r.text)
         r.raise_for_status()
         return r.json()
 

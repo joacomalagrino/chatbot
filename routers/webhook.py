@@ -77,6 +77,7 @@ async def receive_meta_event(request: Request, db: Session = Depends(get_db)):
                         if msg.get("type") == "text":
                             phone = msg["from"]
                             text = msg["text"]["body"]
+                            logger.info("WA incoming from=%s text=%r", phone, text)
                             project = WHATSAPP_NUMBER_TO_PROJECT.get(phone, DEFAULT_WHATSAPP_PROJECT)
                             await _handle_incoming(
                                 db=db,

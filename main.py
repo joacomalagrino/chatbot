@@ -13,7 +13,11 @@ from routers.ads import router as ads_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    create_tables()
+    try:
+        create_tables()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error("DB init failed (app still starts): %s", e)
     yield
 
 

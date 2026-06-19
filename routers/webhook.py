@@ -27,6 +27,9 @@ DEFAULT_WHATSAPP_PROJECT = "agencia"
 DEFAULT_INSTAGRAM_PROJECT = "agencia"
 DEFAULT_LEADFORM_PROJECT = "agencia"
 
+# Los webhooks de Meta son chicos; cualquier cosa enorme es abuso.
+MAX_WEBHOOK_BYTES = 256 * 1024
+
 
 def _resolve_project(value: str, mapping: dict, default: str) -> str:
     """Resuelve el proyecto desde un mapping; cae al default y garantiza que exista."""
@@ -57,6 +60,9 @@ async def verify_webhook(
     hub_challenge: str = Query(None, alias="hub.challenge"),
     hub_verify_token: str = Query(None, alias="hub.verify_token"),
 ):
+    if not settings.meta_verify_token:
+        # Fail-closed: sin token configurado no se valida nada.
+        raise HTTPException(status_code=503, detail="Webhook no configurado (falta META_VERIFY_TOKEN)")
     if (
         hub_mode == "subscribe"
         and hub_challenge is not None
@@ -70,7 +76,12 @@ async def verify_webhook(
 
 @router.post("/meta")
 async def receive_meta_event(request: Request, background_tasks: BackgroundTasks):
+    cl = request.headers.get("content-length")
+    if cl and cl.isdigit() and int(cl) > MAX_WEBHOOK_BYTES:
+        raise HTTPException(status_code=413, detail="Payload demasiado grande")
     body_bytes = await request.body()
+    if len(body_bytes) > MAX_WEBHOOK_BYTES:
+        raise HTTPException(status_code=413, detail="Payload demasiado grande")
     if not _valid_signature(body_bytes, request.headers.get("X-Hub-Signature-256", "")):
         raise HTTPException(status_code=403, detail="Firma inválida")
 

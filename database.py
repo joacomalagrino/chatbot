@@ -1,6 +1,10 @@
-from sqlalchemy import create_engine
+import logging
+
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from config import get_settings
+
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 _db_url = settings.database_url.replace("postgres://", "postgresql://", 1)
@@ -25,3 +29,26 @@ def get_db():
 def create_tables():
     import models  # noqa: F401 — ensures models are registered before create_all
     Base.metadata.create_all(bind=engine)
+    _ensure_indexes()
+
+
+# Índices que aceleran los filtros de /leads y la consulta de historial.
+# create_all NO agrega índices a tablas ya existentes (prod), así que los
+# creamos explícitamente de forma idempotente. Nombres = convención de SQLAlchemy.
+_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS ix_messages_conversation_id ON messages (conversation_id)",
+    "CREATE INDEX IF NOT EXISTS ix_leads_project ON leads (project)",
+    "CREATE INDEX IF NOT EXISTS ix_leads_status ON leads (status)",
+    "CREATE INDEX IF NOT EXISTS ix_leads_created_at ON leads (created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_conversations_project ON conversations (project)",
+    "CREATE INDEX IF NOT EXISTS ix_conversations_status ON conversations (status)",
+]
+
+
+def _ensure_indexes():
+    try:
+        with engine.begin() as conn:
+            for stmt in _INDEXES:
+                conn.execute(text(stmt))
+    except Exception:
+        logger.exception("No se pudieron crear los índices (no es fatal)")

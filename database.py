@@ -40,6 +40,8 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS ix_leads_project ON leads (project)",
     "CREATE INDEX IF NOT EXISTS ix_leads_status ON leads (status)",
     "CREATE INDEX IF NOT EXISTS ix_leads_created_at ON leads (created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_conversations_project ON conversations (project)",
+    "CREATE INDEX IF NOT EXISTS ix_conversations_status ON conversations (status)",
 ]
 
 

@@ -12,14 +12,14 @@ class Conversation(Base):
     __tablename__ = "conversations"
 
     id = Column(Uuid, primary_key=True, default=uuid.uuid4)
-    project = Column(String(50), nullable=False)          # agencia | mesa | ticketera
+    project = Column(String(50), nullable=False, index=True)   # agencia | mesa | ticketera
     session_id = Column(String(200), nullable=False, unique=True)
     channel = Column(String(20), default="web")            # web | whatsapp | instagram
     contact_name = Column(String(200))
     contact_phone = Column(String(50))
     contact_email = Column(String(200))
     contact_instagram = Column(String(100))
-    status = Column(String(20), default="new")             # new | warm | hot | converted
+    status = Column(String(20), default="new", index=True)  # new | warm | hot | converted
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

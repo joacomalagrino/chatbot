@@ -13,6 +13,7 @@ from auth import require_admin
 from config import get_settings
 from database import create_tables
 from ratelimit import limiter
+from services import meta_service
 from routers.ads import router as ads_router
 from routers.chat import router as chat_router
 from routers.leads import router as leads_router
@@ -29,6 +30,7 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("DB init failed (app still starts)")
     yield
+    await meta_service.close_client()
 
 
 app = FastAPI(title="Chatbot Service", lifespan=lifespan)
@@ -86,4 +88,6 @@ def health():
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    # reload solo para desarrollo local: CHATBOT_DEV=1
+    import os
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=os.getenv("CHATBOT_DEV") == "1")

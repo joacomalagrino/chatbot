@@ -85,11 +85,30 @@ def test_ads_requires_auth(client):
     assert client.post("/ads/generate", json={"project": "agencia", "brief": "x"}).status_code == 401
 
 
+def test_leads_stats_requires_auth(client):
+    assert client.get("/leads/stats").status_code == 401
+
+
+def test_leads_stats_shape(client):
+    body = json.dumps(_wa_payload("wamid.ST", "5491100001111", "hola, mi mail es x@y.com")).encode()
+    client.post("/webhook/meta", content=body, headers={"X-Hub-Signature-256": _sign(body)})
+    d = client.get("/leads/stats", headers=ADMIN).json()
+    assert d["total"] == 1
+    assert d["by_project"].get("agencia") == 1
+    assert "by_status" in d and "by_channel" in d and "last_7d" in d
+
+
 # ──────────────────────────────── webhook ────────────────────────────────────
 
 def test_webhook_rejects_missing_signature(client):
     body = json.dumps({"entry": []}).encode()
     assert client.post("/webhook/meta", content=body).status_code == 403
+
+
+def test_webhook_rejects_oversized_body(client):
+    big = json.dumps({"entry": [], "x": "z" * 300_000}).encode()
+    r = client.post("/webhook/meta", content=big, headers={"X-Hub-Signature-256": _sign(big)})
+    assert r.status_code == 413
 
 
 def test_webhook_rejects_bad_signature(client):

@@ -13,6 +13,14 @@
   var ACCENTS = { agencia: '#1a73e8', mesa: '#0ea5e9', ticketera: '#6366f1' };
   var ACCENT = window.CHATBOT_ACCENT || ACCENTS[PROJECT] || '#1a73e8';
 
+  // Prompts sugeridos por proyecto (reducen la fricción de arranque).
+  var SUGGESTIONS = {
+    agencia: ['Ver autos 0km', 'Financiación', 'Permuto mi usado'],
+    mesa: ['Ver planes', '¿Cómo funciona?', 'Prueba gratis'],
+    ticketera: ['Abrir un ticket', 'Estado de mi caso'],
+  };
+  var REDUCED_MOTION = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
   /* ── Estilos ── */
   var css = `
     .cb-root {
@@ -83,9 +91,25 @@
       max-width: 82%; padding: 10px 14px;
       border-radius: 14px; font-size: 14px; line-height: 1.45;
       word-break: break-word; white-space: pre-wrap;
+      animation: cb-in .22s ease both;
     }
-    .cb-msg.bot { background: var(--cb-surface); color: var(--cb-text); border-bottom-left-radius: 4px; align-self: flex-start; }
-    .cb-msg.user { background: var(--cb-accent); color: #fff; border-bottom-right-radius: 4px; align-self: flex-end; }
+    .cb-msg.bot { background: var(--cb-surface); color: var(--cb-text); border-bottom-left-radius: 4px; align-self: flex-start; transform-origin: left bottom; }
+    .cb-msg.user { background: var(--cb-accent); color: #fff; border-bottom-right-radius: 4px; align-self: flex-end; transform-origin: right bottom; }
+    @keyframes cb-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+    #cb-quick { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 16px 12px; }
+    .cb-quick-chip {
+      border: 1.5px solid var(--cb-border); background: var(--cb-bg); color: var(--cb-accent);
+      border-radius: 16px; padding: 7px 13px; font-size: 13px; font-weight: 500; cursor: pointer;
+      transition: border-color .15s, background .15s;
+    }
+    .cb-quick-chip:hover { border-color: var(--cb-accent); background: var(--cb-surface); }
+    .cb-quick-chip:focus-visible { outline: 2px solid var(--cb-accent); outline-offset: 1px; }
+
+    #cb-badge {
+      position: absolute; top: -2px; right: -2px; width: 14px; height: 14px;
+      background: #ea4335; border-radius: 50%; border: 2px solid var(--cb-bg);
+    }
 
     .cb-typing {
       display: flex; gap: 5px; padding: 12px 14px;
@@ -126,8 +150,8 @@
     #cb-send:focus-visible { outline: 2px solid var(--cb-accent); outline-offset: 2px; }
 
     @media (prefers-reduced-motion: reduce) {
-      #cb-launcher, .cb-channel-btn, #cb-input { transition: none; }
-      .cb-typing span { animation: none; }
+      #cb-launcher, .cb-channel-btn, #cb-input, .cb-quick-chip { transition: none; }
+      .cb-typing span, .cb-msg { animation: none; }
     }
   `;
 
@@ -152,6 +176,9 @@
     launcherEl.innerHTML = LAUNCHER_ICON;
     launcherEl.setAttribute('aria-label', 'Abrir chat');
     launcherEl.setAttribute('aria-expanded', 'false');
+    var badge = document.createElement('span');
+    badge.id = 'cb-badge';
+    launcherEl.appendChild(badge);
     root.appendChild(launcherEl);
 
     panelEl = document.createElement('div');
@@ -169,6 +196,7 @@
         <button id="cb-close" aria-label="Cerrar chat">✕</button>
       </div>
       <div id="cb-messages" role="log" aria-live="polite" aria-atomic="false"></div>
+      <div id="cb-quick"></div>
       <div id="cb-channels">
         <p>¿Continuamos por otro canal?</p>
         ${WHATSAPP_NUMBER ? `<a class="cb-channel-btn wa" id="cb-wa-btn" href="#" target="_blank" rel="noopener">${WA_ICON} Continuar por WhatsApp</a>` : ''}
@@ -183,11 +211,14 @@
 
     bindEvents();
     sendWelcome();
+    renderQuickReplies();
   }
 
   function openPanel() {
     panelEl.classList.add('open');
     launcherEl.setAttribute('aria-expanded', 'true');
+    var b = document.getElementById('cb-badge');
+    if (b) b.remove();
     document.getElementById('cb-input').focus();
   }
   function closePanel() {
@@ -225,13 +256,34 @@
     addMessage('bot', welcomes[PROJECT] || welcomes.agencia);
   }
 
+  function scrollToBottom(el) {
+    el.scrollTo({ top: el.scrollHeight, behavior: REDUCED_MOTION ? 'auto' : 'smooth' });
+  }
+
   function addMessage(role, text) {
     var messages = document.getElementById('cb-messages');
     var div = document.createElement('div');
     div.className = 'cb-msg ' + role;
     div.textContent = text;
     messages.appendChild(div);
-    messages.scrollTop = messages.scrollHeight;
+    scrollToBottom(messages);
+  }
+
+  function renderQuickReplies() {
+    var box = document.getElementById('cb-quick');
+    var sugg = SUGGESTIONS[PROJECT] || [];
+    if (!box || !sugg.length) return;
+    sugg.forEach(function (txt) {
+      var chip = document.createElement('button');
+      chip.className = 'cb-quick-chip';
+      chip.type = 'button';
+      chip.textContent = txt;
+      chip.addEventListener('click', function () {
+        document.getElementById('cb-input').value = txt;
+        sendMessage();
+      });
+      box.appendChild(chip);
+    });
   }
 
   function showTyping() {
@@ -242,7 +294,7 @@
     div.setAttribute('aria-label', 'Escribiendo…');
     div.innerHTML = '<span></span><span></span><span></span>';
     messages.appendChild(div);
-    messages.scrollTop = messages.scrollHeight;
+    scrollToBottom(messages);
   }
   function removeTyping() {
     var t = document.getElementById('cb-typing');
@@ -256,6 +308,8 @@
     if (!text) return;
 
     sending = true;
+    var quick = document.getElementById('cb-quick');
+    if (quick) quick.innerHTML = '';
     input.value = '';
     document.getElementById('cb-send').disabled = true;
     addMessage('user', text);

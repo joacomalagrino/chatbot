@@ -1,3 +1,6 @@
+from uuid import UUID
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -19,11 +22,13 @@ def list_leads(project: str | None = None, status: str | None = None, db: Sessio
 
 
 class StatusUpdate(BaseModel):
-    status: str
+    status: Literal["new", "contacted", "qualified", "lost"]
 
 
 @router.patch("/{lead_id}/status")
-def update_status(lead_id: str, body: StatusUpdate, db: Session = Depends(get_db)):
+def update_status(lead_id: UUID, body: StatusUpdate, db: Session = Depends(get_db)):
+    # lead_id: UUID -> FastAPI valida el formato y pasa un objeto UUID al query
+    # (la columna es Uuid; pasarle un str crudo rompería con StatementError).
     lead = db.query(Lead).filter_by(id=lead_id).first()
     if not lead:
         raise HTTPException(status_code=404, detail="Lead no encontrado")

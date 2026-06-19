@@ -1,15 +1,17 @@
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey, JSON
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, JSON, Uuid
 from sqlalchemy.orm import relationship
-from sqlalchemy.dialects.postgresql import UUID
 from datetime import datetime
 import uuid
 from database import Base
+
+# Uuid genérico de SQLAlchemy 2.0: usa el tipo UUID nativo en Postgres y CHAR(32)
+# en SQLite, así los tests/dev local corren sin Postgres y prod queda igual.
 
 
 class Conversation(Base):
     __tablename__ = "conversations"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
     project = Column(String(50), nullable=False)          # agencia | mesa | ticketera
     session_id = Column(String(200), nullable=False, unique=True)
     channel = Column(String(20), default="web")            # web | whatsapp | instagram
@@ -28,8 +30,8 @@ class Conversation(Base):
 class Message(Base):
     __tablename__ = "messages"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    conversation_id = Column(UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=False)
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    conversation_id = Column(Uuid, ForeignKey("conversations.id"), nullable=False)
     role = Column(String(20), nullable=False)               # user | assistant
     content = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -49,8 +51,8 @@ class ProcessedEvent(Base):
 class Lead(Base):
     __tablename__ = "leads"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    conversation_id = Column(UUID(as_uuid=True), ForeignKey("conversations.id"), unique=True)
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    conversation_id = Column(Uuid, ForeignKey("conversations.id"), unique=True)
     project = Column(String(50), nullable=False)
     name = Column(String(200))
     phone = Column(String(50))

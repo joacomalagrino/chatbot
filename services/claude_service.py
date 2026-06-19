@@ -1,8 +1,18 @@
+import logging
+
 import anthropic
+
 from config import get_settings
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
-client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+
+# Cliente ASYNC: no bloquea el event loop de FastAPI. timeout y reintentos acotados.
+client = anthropic.AsyncAnthropic(
+    api_key=settings.anthropic_api_key, timeout=20.0, max_retries=2
+)
+
+FALLBACK = "Disculpá, estoy con un problema técnico en este momento. ¿Probás de nuevo en un ratito?"
 
 SYSTEM_TEMPLATE = """\
 {persona}
@@ -32,11 +42,17 @@ async def get_ai_response(project: str, project_config: dict, message: str, hist
 
     messages = history[-20:] + [{"role": "user", "content": message}]
 
-    response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=300,
-        system=system_prompt,
-        messages=messages,
-    )
+    try:
+        response = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            system=system_prompt,
+            messages=messages,
+        )
+    except anthropic.APIError:
+        logger.exception("Error llamando a la API de Claude")
+        return FALLBACK
 
-    return response.content[0].text
+    # Acceso defensivo: tomar el primer bloque de texto, no asumir content[0].
+    text = next((b.text for b in response.content if getattr(b, "type", None) == "text"), "")
+    return text or FALLBACK

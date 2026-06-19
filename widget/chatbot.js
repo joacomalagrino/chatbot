@@ -247,12 +247,15 @@
         channel: 'web',
       }),
     })
-      .then(function (r) { return r.json(); })
+      .then(function (r) {
+        if (!r.ok) throw new Error('http ' + r.status);
+        return r.json();
+      })
       .then(function (data) {
         removeTyping();
-        addMessage('bot', data.response);
+        addMessage('bot', (data && data.response) || 'Lo siento, hubo un error. Intentá de nuevo.');
 
-        if (data.suggest_channels) {
+        if (data && data.suggest_channels) {
           showChannelSuggestions(text);
         }
       })

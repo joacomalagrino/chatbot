@@ -1,38 +1,54 @@
-from fastapi import APIRouter, Request, Query, HTTPException, Depends
+import hashlib
+import hmac
+import json
+import logging
+
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
+from fastapi.responses import PlainTextResponse
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from database import get_db
-from services.claude_service import get_ai_response
+
+from config import PROJECTS, get_settings
+from database import SessionLocal
+from models import Conversation, Lead, ProcessedEvent
+from services.conversation_service import get_or_create_conversation, record_turn
 from services.meta_service import (
-    send_whatsapp_message,
-    send_instagram_message,
     get_lead_data,
     parse_lead_fields,
+    send_instagram_message,
+    send_whatsapp_message,
 )
-from services.lead_service import update_lead_from_message
-from models import Conversation, Message, Lead
-from config import get_settings, PROJECTS
-import logging
 
 router = APIRouter()
 settings = get_settings()
 logger = logging.getLogger(__name__)
 
-# Map WhatsApp phone numbers → project (update when you have real numbers)
-WHATSAPP_NUMBER_TO_PROJECT: dict[str, str] = {
-    # "5491100000000": "agencia",
-    # "5491100000001": "mesa",
-}
-
-# Default project when the number isn't mapped
 DEFAULT_WHATSAPP_PROJECT = "agencia"
 DEFAULT_INSTAGRAM_PROJECT = "agencia"
-
-# Map Lead Ads form_id → project (update when you create the forms in Meta)
-LEAD_FORM_TO_PROJECT: dict[str, str] = {
-    # "1234567890": "agencia",
-    # "0987654321": "mesa",
-}
 DEFAULT_LEADFORM_PROJECT = "agencia"
+
+
+def _resolve_project(value: str, mapping: dict, default: str) -> str:
+    """Resuelve el proyecto desde un mapping; cae al default y garantiza que exista."""
+    project = mapping.get(value, default)
+    if project not in PROJECTS:
+        project = default if default in PROJECTS else next(iter(PROJECTS))
+    return project
+
+
+def _valid_signature(body: bytes, header: str) -> bool:
+    """Valida X-Hub-Signature-256 (HMAC-SHA256 del body crudo con el App Secret)."""
+    secret = settings.meta_app_secret
+    if not secret:
+        # Aún no configurado: se permite, pero se avisa fuerte. Configurar META_APP_SECRET
+        # en las variables de entorno habilita la validación de firma.
+        logger.warning("META_APP_SECRET no configurado: webhook SIN validación de firma")
+        return True
+    if not header.startswith("sha256="):
+        return False
+    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    received = header.split("=", 1)[1]
+    return hmac.compare_digest(expected, received)
 
 
 @router.get("/meta")
@@ -41,126 +57,129 @@ async def verify_webhook(
     hub_challenge: str = Query(None, alias="hub.challenge"),
     hub_verify_token: str = Query(None, alias="hub.verify_token"),
 ):
-    if hub_mode == "subscribe" and hub_verify_token == settings.meta_verify_token:
-        return int(hub_challenge)
+    if (
+        hub_mode == "subscribe"
+        and hub_challenge is not None
+        and hub_verify_token is not None
+        and hmac.compare_digest(hub_verify_token, settings.meta_verify_token)
+    ):
+        # Meta espera el challenge devuelto verbatim como texto plano.
+        return PlainTextResponse(content=hub_challenge)
     raise HTTPException(status_code=403, detail="Token de verificación inválido")
 
 
 @router.post("/meta")
-async def receive_meta_event(request: Request, db: Session = Depends(get_db)):
-    body = await request.json()
+async def receive_meta_event(request: Request, background_tasks: BackgroundTasks):
+    body_bytes = await request.body()
+    if not _valid_signature(body_bytes, request.headers.get("X-Hub-Signature-256", "")):
+        raise HTTPException(status_code=403, detail="Firma inválida")
+
     try:
-        for entry in body.get("entry", []):
-            # Instagram / Messenger DMs arrive at the entry level, not under `changes`.
-            for event in entry.get("messaging", []):
-                msg = event.get("message", {})
-                if msg.get("text"):
-                    ig_id = event["sender"]["id"]
-                    await _handle_incoming(
-                        db=db,
-                        session_id=f"ig_{ig_id}",
-                        project=DEFAULT_INSTAGRAM_PROJECT,
-                        channel="instagram",
-                        text=msg["text"],
-                        contact_instagram=ig_id,
-                        send_fn=lambda t, i=ig_id: send_instagram_message(i, t),
-                    )
+        body = json.loads(body_bytes or b"{}")
+    except (json.JSONDecodeError, ValueError):
+        raise HTTPException(status_code=400, detail="JSON inválido")
 
-            # WhatsApp messages and Lead Ads arrive under `changes`.
-            for change in entry.get("changes", []):
-                field = change.get("field")
-                value = change.get("value", {})
-
-                if field == "messages":
-                    # WhatsApp incoming messages
-                    for msg in value.get("messages", []):
-                        if msg.get("type") == "text":
-                            phone = msg["from"]
-                            text = msg["text"]["body"]
-                            logger.error("WA incoming from=%s text=%r", phone, text)
-                            project = WHATSAPP_NUMBER_TO_PROJECT.get(phone, DEFAULT_WHATSAPP_PROJECT)
-                            await _handle_incoming(
-                                db=db,
-                                session_id=f"wa_{phone}",
-                                project=project,
-                                channel="whatsapp",
-                                text=text,
-                                contact_phone=phone,
-                                send_fn=lambda t, p=phone: send_whatsapp_message(p, t),
-                            )
-
-                elif field == "leadgen":
-                    # Lead Ads: a user submitted an instant form
-                    await _handle_lead_ad(db, value)
-    except Exception:
-        logger.exception("Error procesando webhook Meta")
-
-    # Meta requires a 200 response even on errors
+    # Responder 200 al instante y procesar en segundo plano: así Meta no reintenta
+    # por timeout mientras esperamos a Claude / a la Graph API.
+    background_tasks.add_task(_process_event, body)
     return {"status": "ok"}
 
 
-async def _handle_incoming(
-    db: Session,
-    session_id: str,
-    project: str,
-    channel: str,
-    text: str,
-    send_fn,
-    contact_phone: str = None,
-    contact_instagram: str = None,
-):
-    conversation = db.query(Conversation).filter_by(session_id=session_id).first()
-    if not conversation:
-        conversation = Conversation(
-            session_id=session_id,
-            project=project,
-            channel=channel,
-            contact_phone=contact_phone,
-            contact_instagram=contact_instagram,
-        )
-        db.add(conversation)
+async def _process_event(body: dict):
+    """Procesa el webhook con su propia sesión de DB (la de get_db ya está cerrada)."""
+    db = SessionLocal()
+    try:
+        for entry in body.get("entry", []):
+            # Instagram / Messenger DMs llegan a nivel `messaging`.
+            for event in entry.get("messaging", []):
+                await _handle_ig_event(db, event)
+            # WhatsApp y Lead Ads llegan bajo `changes`.
+            for change in entry.get("changes", []):
+                await _handle_change(db, change)
+    except Exception:
+        logger.exception("Error procesando webhook Meta")
+    finally:
+        db.close()
+
+
+def _claim_event(db: Session, event_id: str) -> bool:
+    """Registra el id del evento. Devuelve True si es nuevo, False si ya se procesó."""
+    if not event_id:
+        return True
+    if db.query(ProcessedEvent).filter_by(event_id=event_id).first():
+        return False
+    db.add(ProcessedEvent(event_id=event_id))
+    try:
         db.commit()
-        db.refresh(conversation)
+        return True
+    except IntegrityError:
+        db.rollback()
+        return False
 
-    db.add(Message(conversation_id=conversation.id, role="user", content=text))
-    db.commit()
-    db.refresh(conversation)
 
-    history = [{"role": m.role, "content": m.content} for m in conversation.messages[:-1]]
-    response_text = await get_ai_response(project, PROJECTS[project], text, history)
+async def _handle_ig_event(db: Session, event: dict):
+    msg = event.get("message", {})
+    text = msg.get("text")
+    if not text:
+        return
+    mid = msg.get("mid")
+    if not _claim_event(db, f"ig_{mid}" if mid else ""):
+        return
+    ig_id = event.get("sender", {}).get("id")
+    if not ig_id:
+        return
+    project = _resolve_project("", {}, DEFAULT_INSTAGRAM_PROJECT)
+    conversation = get_or_create_conversation(
+        db, f"ig_{ig_id}", project, "instagram", contact_instagram=ig_id
+    )
+    response_text = await record_turn(db, conversation, text)
+    await send_instagram_message(ig_id, response_text)
 
-    db.add(Message(conversation_id=conversation.id, role="assistant", content=response_text))
-    db.commit()
 
-    update_lead_from_message(db, conversation, text)
+async def _handle_change(db: Session, change: dict):
+    field = change.get("field")
+    value = change.get("value", {})
 
-    await send_fn(response_text)
+    if field == "messages":
+        for msg in value.get("messages", []):
+            if msg.get("type") != "text":
+                continue
+            text = (msg.get("text") or {}).get("body")
+            if not text:
+                continue
+            wamid = msg.get("id")
+            if not _claim_event(db, f"wa_{wamid}" if wamid else ""):
+                continue
+            phone = msg.get("from")
+            if not phone:
+                continue
+            project = _resolve_project(phone, settings.wa_number_map(), DEFAULT_WHATSAPP_PROJECT)
+            conversation = get_or_create_conversation(
+                db, f"wa_{phone}", project, "whatsapp", contact_phone=phone
+            )
+            response_text = await record_turn(db, conversation, text)
+            await send_whatsapp_message(phone, response_text)
+
+    elif field == "leadgen":
+        await _handle_lead_ad(db, value)
 
 
 async def _handle_lead_ad(db: Session, value: dict):
-    """Process a Lead Ads submission: fetch the form data and store a Lead."""
+    """Procesa una submission de Lead Ads: trae los datos del formulario y guarda un Lead."""
     leadgen_id = value.get("leadgen_id")
-    form_id = str(value.get("form_id", ""))
     if not leadgen_id:
         return
+    if not _claim_event(db, f"lead_{leadgen_id}"):
+        return
 
-    project = LEAD_FORM_TO_PROJECT.get(form_id, DEFAULT_LEADFORM_PROJECT)
+    form_id = str(value.get("form_id", ""))
+    project = _resolve_project(form_id, settings.lead_form_map(), DEFAULT_LEADFORM_PROJECT)
 
     data = await get_lead_data(leadgen_id)
     fields = parse_lead_fields(data.get("field_data", []))
 
-    session_id = f"lead_{leadgen_id}"
-    conversation = db.query(Conversation).filter_by(session_id=session_id).first()
-    if not conversation:
-        conversation = Conversation(
-            session_id=session_id,
-            project=project,
-            channel="lead_ad",
-            status="hot",
-        )
-        db.add(conversation)
-        db.commit()
-        db.refresh(conversation)
+    conversation = get_or_create_conversation(db, f"lead_{leadgen_id}", project, "lead_ad")
+    conversation.status = "hot"
 
     name = fields.get("full_name") or fields.get("name")
     email = fields.get("email")
@@ -180,6 +199,12 @@ async def _handle_lead_ad(db: Session, value: dict):
     lead.interests = fields
     lead.status = "new"
     lead.notes = f"Vino de Lead Ad (form {form_id}, ad {value.get('ad_id', '?')})"
-    db.commit()
 
-    logger.info("Lead Ad capturado: %s (%s)", name, project)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        logger.exception("IntegrityError guardando Lead Ad")
+        return
+
+    logger.info("Lead Ad capturado (project=%s)", project)

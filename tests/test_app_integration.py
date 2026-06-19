@@ -61,6 +61,19 @@ def test_health(client):
     assert client.get("/health").json() == {"status": "ok"}
 
 
+def test_security_headers_present(client):
+    h = client.get("/health").headers
+    assert h["x-content-type-options"] == "nosniff"
+    assert h["x-frame-options"] == "SAMEORIGIN"
+    assert "referrer-policy" in h
+    assert "strict-transport-security" in h
+
+
+def test_widget_is_cacheable(client):
+    h = client.get("/widget/chatbot.js").headers
+    assert "max-age" in h.get("cache-control", "")
+
+
 def test_leads_requires_auth(client):
     assert client.get("/leads/").status_code == 401
     r = client.get("/leads/", headers=ADMIN)

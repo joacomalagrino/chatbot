@@ -31,7 +31,7 @@ class Message(Base):
     __tablename__ = "messages"
 
     id = Column(Uuid, primary_key=True, default=uuid.uuid4)
-    conversation_id = Column(Uuid, ForeignKey("conversations.id"), nullable=False)
+    conversation_id = Column(Uuid, ForeignKey("conversations.id"), nullable=False, index=True)
     role = Column(String(20), nullable=False)               # user | assistant
     content = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -53,14 +53,14 @@ class Lead(Base):
 
     id = Column(Uuid, primary_key=True, default=uuid.uuid4)
     conversation_id = Column(Uuid, ForeignKey("conversations.id"), unique=True)
-    project = Column(String(50), nullable=False)
+    project = Column(String(50), nullable=False, index=True)
     name = Column(String(200))
     phone = Column(String(50))
     email = Column(String(200))
     instagram = Column(String(100))
     interests = Column(JSON)
-    status = Column(String(20), default="new")              # new | contacted | qualified | lost
+    status = Column(String(20), default="new", index=True)  # new | contacted | qualified | lost
     notes = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
     conversation = relationship("Conversation", back_populates="lead")

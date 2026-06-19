@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Panel · Chatbot</title>
+  <style>
+    :root {
+      --accent: #1a73e8;
+      --accent-d: #1557b0;
+      --bg: #f5f6f8;
+      --card: #ffffff;
+      --text: #202124;
+      --muted: #5f6368;
+      --border: #e3e5e8;
+      --radius: 12px;
+      --shadow: 0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.04);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #15171c; --card: #1f2228; --text: #e8eaed;
+        --muted: #9aa0a6; --border: #2d3139;
+        --shadow: 0 1px 3px rgba(0,0,0,.4);
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg); color: var(--text); line-height: 1.5;
+    }
+    header {
+      background: var(--card); border-bottom: 1px solid var(--border);
+      padding: 14px 24px; display: flex; align-items: center; gap: 12px;
+      position: sticky; top: 0; z-index: 10;
+    }
+    header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+    header .badge { font-size: 11px; color: var(--muted); background: var(--bg);
+      padding: 2px 8px; border-radius: 20px; border: 1px solid var(--border); }
+    header .spacer { flex: 1; }
+    button {
+      font: inherit; cursor: pointer; border: none; border-radius: 8px;
+      padding: 9px 16px; font-weight: 500; transition: background .15s, opacity .15s;
+    }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover { background: var(--accent-d); }
+    .btn-primary:disabled { opacity: .5; cursor: default; }
+    .btn-ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+    .btn-ghost:hover { background: var(--bg); }
+
+    main { max-width: 1100px; margin: 0 auto; padding: 24px; }
+    .tabs { display: flex; gap: 4px; margin-bottom: 20px; }
+    .tab {
+      padding: 8px 16px; border-radius: 8px; background: transparent;
+      color: var(--muted); font-weight: 500;
+    }
+    .tab.active { background: var(--accent); color: #fff; }
+
+    .card { background: var(--card); border: 1px solid var(--border);
+      border-radius: var(--radius); box-shadow: var(--shadow); padding: 20px; }
+    .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+    select, input, textarea {
+      font: inherit; padding: 8px 12px; border-radius: 8px;
+      border: 1px solid var(--border); background: var(--card); color: var(--text); outline: none;
+    }
+    select:focus, input:focus, textarea:focus { border-color: var(--accent); }
+    label { font-size: 13px; color: var(--muted); display: block; margin-bottom: 5px; font-weight: 500; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th { text-align: left; padding: 10px 12px; color: var(--muted); font-weight: 600;
+      font-size: 12px; text-transform: uppercase; letter-spacing: .03em; border-bottom: 1px solid var(--border); }
+    td { padding: 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    tr:last-child td { border-bottom: none; }
+    .chip { display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+    .chip.new { background: #e8f0fe; color: #1557b0; }
+    .chip.warm { background: #fef7e0; color: #b06000; }
+    .chip.hot { background: #fce8e6; color: #c5221f; }
+    .chip.contacted, .chip.qualified, .chip.converted { background: #e6f4ea; color: #137333; }
+    .chip.lost { background: #f1f3f4; color: #5f6368; }
+    .proj { font-size: 12px; color: var(--muted); }
+    .empty { text-align: center; padding: 48px; color: var(--muted); }
+    .muted { color: var(--muted); font-size: 13px; }
+
+    /* Gate */
+    #gate { position: fixed; inset: 0; background: var(--bg); display: flex;
+      align-items: center; justify-content: center; z-index: 100; padding: 24px; }
+    #gate .card { max-width: 360px; width: 100%; }
+    #gate h2 { margin: 0 0 6px; font-size: 18px; }
+    #gate p { margin: 0 0 16px; color: var(--muted); font-size: 14px; }
+    #gate input { width: 100%; margin-bottom: 12px; }
+    #gate button { width: 100%; }
+    .err { color: #c5221f; font-size: 13px; margin-top: 10px; min-height: 18px; }
+
+    .grid { display: grid; gap: 16px; grid-template-columns: 1fr 1fr 1fr; margin-top: 20px; }
+    @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+    .variant h4 { margin: 0 0 4px; font-size: 15px; }
+    .variant .body { font-size: 14px; margin: 8px 0; }
+    .variant .meta { font-size: 12px; color: var(--muted); }
+    .cta { display: inline-block; margin-top: 8px; font-size: 12px; font-weight: 600;
+      color: var(--accent); border: 1px solid var(--accent); padding: 3px 10px; border-radius: 6px; }
+    .field { margin-bottom: 14px; }
+    .field textarea { width: 100%; min-height: 80px; resize: vertical; }
+    .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,.4);
+      border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: middle; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+  </style>
+</head>
+<body>
+  <!-- Gate de token -->
+  <div id="gate">
+    <div class="card">
+      <h2>Panel del Chatbot</h2>
+      <p>Ingresá tu token de administrador para continuar.</p>
+      <input id="gate-token" type="password" placeholder="ADMIN_API_KEY" autocomplete="off" />
+      <button class="btn-primary" id="gate-btn">Entrar</button>
+      <div class="err" id="gate-err"></div>
+    </div>
+  </div>
+
+  <header style="display:none">
+    <h1>💬 Chatbot</h1>
+    <span class="badge" id="env-badge">panel</span>
+    <div class="spacer"></div>
+    <button class="btn-ghost" id="logout">Salir</button>
+  </header>
+
+  <main style="display:none">
+    <div class="tabs">
+      <button class="tab active" data-tab="leads">Leads</button>
+      <button class="tab" data-tab="ads">Generar anuncios</button>
+    </div>
+
+    <!-- Leads -->
+    <section id="tab-leads">
+      <div class="toolbar">
+        <div>
+          <label>Proyecto</label>
+          <select id="filter-project">
+            <option value="">Todos</option>
+            <option value="agencia">Agencia</option>
+            <option value="mesa">Mesa</option>
+            <option value="ticketera">Ticketera</option>
+          </select>
+        </div>
+        <div>
+          <label>Estado</label>
+          <select id="filter-status">
+            <option value="">Todos</option>
+            <option value="new">Nuevo</option>
+            <option value="contacted">Contactado</option>
+            <option value="qualified">Calificado</option>
+            <option value="lost">Perdido</option>
+          </select>
+        </div>
+        <div style="align-self:flex-end">
+          <button class="btn-ghost" id="reload">↻ Actualizar</button>
+        </div>
+      </div>
+      <div class="card">
+        <div id="leads-content"><div class="empty">Cargando…</div></div>
+      </div>
+    </section>
+
+    <!-- Ads -->
+    <section id="tab-ads" style="display:none">
+      <div class="card">
+        <div class="field">
+          <label>Proyecto</label>
+          <select id="ad-project">
+            <option value="agencia">Agencia — Gonzalo Ferraro Automóviles</option>
+            <option value="mesa">Mesa — Helpdesk</option>
+            <option value="ticketera">Ticketera — Soporte Dedalus</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>¿Qué querés promocionar? (brief)</label>
+          <textarea id="ad-brief" maxlength="1000" placeholder="Ej: Financiación 0% en autos 0km para este mes"></textarea>
+        </div>
+        <div class="field">
+          <label>Plataforma</label>
+          <select id="ad-channel">
+            <option value="ambos">Facebook + Instagram</option>
+            <option value="facebook">Facebook</option>
+            <option value="instagram">Instagram</option>
+          </select>
+        </div>
+        <button class="btn-primary" id="ad-generate">Generar 3 variantes</button>
+        <div class="err" id="ad-err"></div>
+        <div id="ad-results"></div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    var TOKEN = localStorage.getItem('cb_admin_token') || '';
+
+    function authHeaders() { return { 'Authorization': 'Bearer ' + TOKEN }; }
+    function esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : String(s)); return d.innerHTML; }
+
+    // ── Gate ──
+    function showApp() {
+      document.getElementById('gate').style.display = 'none';
+      document.querySelector('header').style.display = 'flex';
+      document.querySelector('main').style.display = 'block';
+      loadLeads();
+    }
+    function tryLogin(token) {
+      // Validamos llamando a /leads/ con el token.
+      return fetch('/leads/', { headers: { 'Authorization': 'Bearer ' + token } })
+        .then(function (r) {
+          if (r.status === 401) throw new Error('Token incorrecto.');
+          if (r.status === 503) throw new Error('Falta configurar ADMIN_API_KEY en el servidor.');
+          if (!r.ok) throw new Error('Error ' + r.status);
+          return true;
+        });
+    }
+    document.getElementById('gate-btn').addEventListener('click', function () {
+      var t = document.getElementById('gate-token').value.trim();
+      var err = document.getElementById('gate-err');
+      err.textContent = '';
+      if (!t) { err.textContent = 'Ingresá el token.'; return; }
+      tryLogin(t).then(function () {
+        TOKEN = t; localStorage.setItem('cb_admin_token', t); showApp();
+      }).catch(function (e) { err.textContent = e.message; });
+    });
+    document.getElementById('gate-token').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') document.getElementById('gate-btn').click();
+    });
+    document.getElementById('logout').addEventListener('click', function () {
+      localStorage.removeItem('cb_admin_token'); location.reload();
+    });
+
+    // ── Tabs ──
+    document.querySelectorAll('.tab').forEach(function (tab) {
+      tab.addEventListener('click', function () {
+        document.querySelectorAll('.tab').forEach(function (t) { t.classList.remove('active'); });
+        tab.classList.add('active');
+        var name = tab.dataset.tab;
+        document.getElementById('tab-leads').style.display = name === 'leads' ? 'block' : 'none';
+        document.getElementById('tab-ads').style.display = name === 'ads' ? 'block' : 'none';
+      });
+    });
+
+    // ── Leads ──
+    var STATUS_OPTS = ['new', 'contacted', 'qualified', 'lost'];
+    var STATUS_LABEL = { new: 'Nuevo', contacted: 'Contactado', qualified: 'Calificado', lost: 'Perdido',
+      warm: 'Tibio', hot: 'Caliente', converted: 'Convertido' };
+
+    function loadLeads() {
+      var proj = document.getElementById('filter-project').value;
+      var status = document.getElementById('filter-status').value;
+      var qs = [];
+      if (proj) qs.push('project=' + encodeURIComponent(proj));
+      if (status) qs.push('status=' + encodeURIComponent(status));
+      var url = '/leads/' + (qs.length ? '?' + qs.join('&') : '');
+      var content = document.getElementById('leads-content');
+      content.innerHTML = '<div class="empty">Cargando…</div>';
+
+      fetch(url, { headers: authHeaders() })
+        .then(function (r) { if (!r.ok) throw new Error('Error ' + r.status); return r.json(); })
+        .then(renderLeads)
+        .catch(function (e) { content.innerHTML = '<div class="empty">No se pudo cargar (' + esc(e.message) + ')</div>'; });
+    }
+
+    function renderLeads(leads) {
+      var content = document.getElementById('leads-content');
+      if (!leads.length) { content.innerHTML = '<div class="empty">Todavía no hay leads. 🌱<br><span class="muted">Aparecen acá cuando alguien deja sus datos en el chat.</span></div>'; return; }
+
+      var rows = leads.map(function (l) {
+        var contact = [l.phone, l.email, l.instagram ? '@' + l.instagram : ''].filter(Boolean).map(esc).join('<br>');
+        var opts = STATUS_OPTS.map(function (s) {
+          return '<option value="' + s + '"' + (s === l.status ? ' selected' : '') + '>' + STATUS_LABEL[s] + '</option>';
+        }).join('');
+        var date = l.created_at ? new Date(l.created_at).toLocaleDateString('es-AR', { day: '2-digit', month: 'short' }) : '';
+        return '<tr>' +
+          '<td><strong>' + esc(l.name || '—') + '</strong><div class="proj">' + esc(l.project) + '</div></td>' +
+          '<td>' + (contact || '<span class="muted">—</span>') + '</td>' +
+          '<td><span class="chip ' + esc(l.status) + '">' + (STATUS_LABEL[l.status] || esc(l.status)) + '</span></td>' +
+          '<td><select data-id="' + esc(l.id) + '" class="status-sel">' + opts + '</select></td>' +
+          '<td class="muted">' + esc(date) + '</td>' +
+        '</tr>';
+      }).join('');
+
+      content.innerHTML =
+        '<div class="muted" style="margin-bottom:10px">' + leads.length + ' lead' + (leads.length > 1 ? 's' : '') + '</div>' +
+        '<table><thead><tr><th>Nombre</th><th>Contacto</th><th>Estado</th><th>Cambiar</th><th>Fecha</th></tr></thead><tbody>' +
+        rows + '</tbody></table>';
+
+      document.querySelectorAll('.status-sel').forEach(function (sel) {
+        sel.addEventListener('change', function () {
+          updateStatus(sel.dataset.id, sel.value);
+        });
+      });
+    }
+
+    function updateStatus(id, status) {
+      fetch('/leads/' + id + '/status', {
+        method: 'PATCH',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
+        body: JSON.stringify({ status: status }),
+      }).then(function (r) { if (r.ok) loadLeads(); });
+    }
+
+    document.getElementById('reload').addEventListener('click', loadLeads);
+    document.getElementById('filter-project').addEventListener('change', loadLeads);
+    document.getElementById('filter-status').addEventListener('change', loadLeads);
+
+    // ── Ads ──
+    document.getElementById('ad-generate').addEventListener('click', function () {
+      var btn = this;
+      var err = document.getElementById('ad-err');
+      var results = document.getElementById('ad-results');
+      err.textContent = ''; results.innerHTML = '';
+      var brief = document.getElementById('ad-brief').value.trim();
+      if (!brief) { err.textContent = 'Escribí qué querés promocionar.'; return; }
+
+      btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Generando…';
+      fetch('/ads/generate', {
+        method: 'POST',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
+        body: JSON.stringify({
+          project: document.getElementById('ad-project').value,
+          brief: brief,
+          channel: document.getElementById('ad-channel').value,
+        }),
+      })
+        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(function (res) {
+          if (!res.ok) throw new Error((res.d && res.d.detail) || 'Error generando');
+          renderAds(res.d);
+        })
+        .catch(function (e) { err.textContent = e.message; })
+        .finally(function () { btn.disabled = false; btn.textContent = 'Generar 3 variantes'; });
+    });
+
+    function renderAds(data) {
+      var results = document.getElementById('ad-results');
+      var variants = (data.variantes || []).map(function (v) {
+        return '<div class="card variant">' +
+          '<h4>' + esc(v.titular) + '</h4>' +
+          '<div class="muted">' + esc(v.descripcion) + '</div>' +
+          '<div class="body">' + esc(v.texto_principal) + '</div>' +
+          '<div class="meta">🎨 ' + esc(v.concepto_visual) + '</div>' +
+          '<span class="cta">' + esc(v.cta) + '</span>' +
+        '</div>';
+      }).join('');
+
+      var pub = data.publico_sugerido || {};
+      var aud = '<div class="card" style="margin-top:16px">' +
+        '<strong>Público sugerido</strong><div class="muted" style="margin-top:6px">' +
+        'Edad: ' + esc(pub.edad || '—') + ' · Ubicación: ' + esc(pub.ubicacion || '—') + '<br>' +
+        'Intereses: ' + esc((pub.intereses || []).join(', ')) + '<br>' +
+        'Presupuesto sugerido: ' + esc(data.presupuesto_sugerido_ars_dia || '—') + ' /día' +
+        '</div></div>';
+
+      results.innerHTML = '<div class="grid">' + variants + '</div>' + aud;
+    }
+  </script>
+</body>
+</html>

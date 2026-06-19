@@ -54,6 +54,8 @@ app.include_router(
 )
 
 app.mount("/widget", StaticFiles(directory="widget"), name="widget")
+# Panel de administración (HTML estático; la auth la hace cada llamada a la API con el token).
+app.mount("/admin", StaticFiles(directory="admin", html=True), name="admin")
 
 
 @app.get("/health")

@@ -57,14 +57,26 @@ _SECURITY_HEADERS = {
 }
 
 
+# CSP del panel admin: scripts solo desde el propio origen (sin inline -> bloquea XSS),
+# estilos inline permitidos (usa style="" para anchos/visibilidad), nada de framing.
+_ADMIN_CSP = (
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'"
+)
+
+
 @app.middleware("http")
 async def security_and_cache_headers(request: Request, call_next):
     response = await call_next(request)
     for k, v in _SECURITY_HEADERS.items():
         response.headers.setdefault(k, v)
+    path = request.url.path
     # El widget.js se carga en cada pageview de los sitios cliente -> cachear.
-    if request.url.path.startswith("/widget"):
+    if path.startswith("/widget"):
         response.headers.setdefault("Cache-Control", "public, max-age=3600")
+    # CSP estricta solo para el panel (no global: rompería /docs).
+    if path.startswith("/admin"):
+        response.headers.setdefault("Content-Security-Policy", _ADMIN_CSP)
     return response
 
 app.include_router(chat_router, prefix="/chat", tags=["chat"])

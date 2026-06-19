@@ -37,6 +37,15 @@ class Message(Base):
     conversation = relationship("Conversation", back_populates="messages")
 
 
+class ProcessedEvent(Base):
+    """Idempotencia: registra los ids de eventos de Meta ya procesados
+    (wamid de WhatsApp, mid de Instagram, leadgen_id) para descartar reintentos."""
+    __tablename__ = "processed_events"
+
+    event_id = Column(String(200), primary_key=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class Lead(Base):
     __tablename__ = "leads"
 

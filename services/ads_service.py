@@ -1,9 +1,16 @@
-import json
-import anthropic
-from config import get_settings
+import logging
 
+import anthropic
+
+from config import get_settings
+from services.text_utils import parse_model_json
+
+logger = logging.getLogger(__name__)
 settings = get_settings()
-client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+
+# Cliente SYNC a propósito: el endpoint /ads/generate es `def` (corre en threadpool),
+# así que no bloquea el event loop. Si se pasa el endpoint a `async def`, migrar a AsyncAnthropic.
+client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=30.0, max_retries=2)
 
 AD_SYSTEM = """\
 Sos un copywriter publicitario experto en Meta Ads (Facebook e Instagram) para el mercado argentino.
@@ -37,10 +44,9 @@ Respondés ÚNICAMENTE con un JSON válido, sin texto adicional, con esta forma 
 
 
 def generate_ad(project: str, project_config: dict, brief: str, channel: str = "ambos") -> dict:
-    """Generate 3 ad variants + targeting suggestion for a given brief.
+    """Genera 3 variantes de anuncio + sugerencia de público para un brief.
 
-    brief: free text describing what to promote, e.g.
-      "Financiación 0% en autos 0km" or "Prueba gratis de Mesa para PyMEs".
+    brief: texto libre describiendo qué promocionar.
     channel: facebook | instagram | ambos
     """
     system = AD_SYSTEM.format(
@@ -55,22 +61,19 @@ def generate_ad(project: str, project_config: dict, brief: str, channel: str = "
         f"Recordá: solo el JSON, nada más."
     )
 
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1200,
-        system=system,
-        messages=[{"role": "user", "content": user_prompt}],
-    )
-
-    raw = response.content[0].text.strip()
-    # Tolerate accidental markdown fencing
-    if raw.startswith("```"):
-        raw = raw.split("```", 2)[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-        raw = raw.strip()
-
     try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return {"error": "No se pudo parsear la respuesta del modelo", "raw": raw}
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1200,
+            system=system,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+    except anthropic.APIError as e:
+        logger.exception("Error llamando a la API de Claude en generate_ad")
+        return {"error": f"Error del modelo ({e.__class__.__name__})"}
+
+    if getattr(response, "stop_reason", None) == "max_tokens":
+        return {"error": "La respuesta se truncó (max_tokens). Probá con un brief más corto."}
+
+    raw = next((b.text for b in response.content if getattr(b, "type", None) == "text"), "")
+    return parse_model_json(raw)

@@ -8,7 +8,7 @@ router = APIRouter()
 
 
 @router.get("/")
-def list_leads(project: str = None, status: str = None, db: Session = Depends(get_db)):
+def list_leads(project: str | None = None, status: str | None = None, db: Session = Depends(get_db)):
     query = db.query(Lead)
     if project:
         query = query.filter_by(project=project)

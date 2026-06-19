@@ -1,17 +1,54 @@
-from pydantic_settings import BaseSettings
+import json
 from functools import lru_cache
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
     database_url: str
     anthropic_api_key: str
+
+    # Meta / WhatsApp / Instagram
     meta_access_token: str = ""
     meta_verify_token: str = "chatbot_verify_2024"
+    meta_app_secret: str = ""          # para validar la firma del webhook (X-Hub-Signature-256)
     meta_whatsapp_phone_id: str = ""
     meta_instagram_account_id: str = ""
 
-    class Config:
-        env_file = ".env"
+    # Auth de endpoints internos (/leads, /ads). Sin esto, esos endpoints quedan cerrados.
+    admin_api_key: str = ""
+
+    # CORS: lista separada por comas, o "*" para abrir a todos.
+    allowed_origins: str = "*"
+
+    # Ruteo opcional (JSON). Ej: {"541165613300": "mesa"} y {"123456": "agencia"}.
+    whatsapp_number_to_project: str = ""
+    lead_form_to_project: str = ""
+
+    def origins_list(self) -> list[str]:
+        raw = (self.allowed_origins or "").strip()
+        if not raw or raw == "*":
+            return ["*"]
+        return [o.strip() for o in raw.split(",") if o.strip()]
+
+    def wa_number_map(self) -> dict:
+        return _parse_json_map(self.whatsapp_number_to_project)
+
+    def lead_form_map(self) -> dict:
+        return _parse_json_map(self.lead_form_to_project)
+
+
+def _parse_json_map(raw: str) -> dict:
+    raw = (raw or "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 @lru_cache()

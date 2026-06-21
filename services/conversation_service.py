@@ -34,8 +34,16 @@ def get_or_create_conversation(
     try:
         db.commit()
     except IntegrityError:
+        # Otro request creó la misma session_id en paralelo: releemos la suya.
         db.rollback()
         conversation = db.query(Conversation).filter_by(session_id=session_id).first()
+        if conversation is None:
+            # No debería pasar (el IntegrityError implica que existe), pero bajo
+            # ciertos niveles de aislamiento la fila podría no ser visible aún.
+            # Mejor fallar ruidoso que devolver None y reventar aguas abajo.
+            raise RuntimeError(
+                f"Conversación {session_id} no encontrada tras IntegrityError"
+            )
     else:
         db.refresh(conversation)
     return conversation

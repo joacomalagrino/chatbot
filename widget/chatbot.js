@@ -5,13 +5,37 @@
   var PROJECT = window.CHATBOT_PROJECT || 'agencia';
   var WHATSAPP_NUMBER = window.CHATBOT_WHATSAPP || '';
   var INSTAGRAM_USER = window.CHATBOT_INSTAGRAM || '';
-  var SESSION_ID = 'cb_' + PROJECT + '_' + Math.random().toString(36).substr(2, 9);
+  // Sesión persistente por proyecto: si se recarga la página, se reusa la misma
+  // conversación (si no, el lead quedaba huérfano). sessionStorage = dura la pestaña.
+  var SESSION_ID = (function () {
+    var key = 'cb_sid_' + PROJECT;
+    try {
+      var stored = sessionStorage.getItem(key);
+      if (stored) return stored;
+      var sid = 'cb_' + PROJECT + '_' + Math.random().toString(36).substr(2, 9);
+      sessionStorage.setItem(key, sid);
+      return sid;
+    } catch (e) {
+      // sessionStorage puede no estar disponible (modo privado/3rd-party); seguimos sin persistir.
+      return 'cb_' + PROJECT + '_' + Math.random().toString(36).substr(2, 9);
+    }
+  })();
   var messageCount = 0;
   var sending = false;
 
   // Accent por proyecto (se puede pisar con window.CHATBOT_ACCENT).
   var ACCENTS = { agencia: '#1a73e8', mesa: '#0ea5e9', ticketera: '#6366f1' };
   var ACCENT = window.CHATBOT_ACCENT || ACCENTS[PROJECT] || '#1a73e8';
+
+  // Header por proyecto (avatar / título / subtítulo). Se puede pisar con
+  // window.CHATBOT_HEADER = { avatar, title, subtitle }.
+  var HEADERS = {
+    agencia: { avatar: '🚗', title: 'Gonzalo Ferraro', subtitle: 'Estamos para ayudarte' },
+    mesa: { avatar: '💬', title: 'Mesa', subtitle: 'Soporte para tu equipo' },
+    ticketera: { avatar: '🛠️', title: 'Soporte Dedalus', subtitle: 'Estamos para ayudarte' },
+  };
+  var DEFAULT_HEADER = { avatar: '💬', title: 'Hola 👋', subtitle: 'Estamos para ayudarte' };
+  var HEADER = Object.assign({}, DEFAULT_HEADER, HEADERS[PROJECT] || {}, window.CHATBOT_HEADER || {});
 
   // Prompts sugeridos por proyecto (reducen la fricción de arranque).
   var SUGGESTIONS = {
@@ -55,10 +79,16 @@
       width: 340px; max-height: min(520px, calc(100vh - 120px));
       background: var(--cb-bg); color: var(--cb-text); border-radius: 16px;
       box-shadow: 0 8px 32px rgba(0,0,0,.18);
-      display: none; flex-direction: column; overflow: hidden;
+      display: flex; flex-direction: column; overflow: hidden;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      opacity: 0; transform: translateY(12px) scale(.98); transform-origin: bottom right;
+      pointer-events: none; visibility: hidden;
+      transition: opacity .22s ease, transform .22s ease, visibility 0s linear .22s;
     }
-    #cb-panel.open { display: flex; }
+    #cb-panel.open {
+      opacity: 1; transform: none; pointer-events: auto; visibility: visible;
+      transition: opacity .22s ease, transform .22s ease;
+    }
     @media (max-width: 420px) {
       #cb-panel { right: 0; left: 0; bottom: 0; width: 100%;
         max-height: 85vh; border-radius: 16px 16px 0 0; }
@@ -120,6 +150,15 @@
     .cb-typing span:nth-child(3) { animation-delay: .3s; }
     @keyframes cb-bounce { 0%, 60%, 100% { transform: translateY(0); } 30% { transform: translateY(-6px); } }
 
+    .cb-retry { align-self: flex-start; }
+    .cb-retry-btn {
+      border: 1.5px solid var(--cb-border); background: var(--cb-bg); color: var(--cb-accent);
+      border-radius: 16px; padding: 6px 13px; font-size: 13px; font-weight: 500; cursor: pointer;
+      transition: border-color .15s, background .15s;
+    }
+    .cb-retry-btn:hover { border-color: var(--cb-accent); background: var(--cb-surface); }
+    .cb-retry-btn:focus-visible { outline: 2px solid var(--cb-accent); outline-offset: 1px; }
+
     #cb-channels { margin: 0 16px 12px; display: none; flex-direction: column; gap: 8px; }
     #cb-channels.visible { display: flex; }
     #cb-channels p { font-size: 12px; color: var(--cb-muted); margin: 0 0 4px; text-align: center; }
@@ -150,7 +189,9 @@
     #cb-send:focus-visible { outline: 2px solid var(--cb-accent); outline-offset: 2px; }
 
     @media (prefers-reduced-motion: reduce) {
-      #cb-launcher, .cb-channel-btn, #cb-input, .cb-quick-chip { transition: none; }
+      #cb-launcher, .cb-channel-btn, #cb-input, .cb-quick-chip, .cb-retry-btn { transition: none; }
+      #cb-panel { transition: visibility 0s; transform: none; }
+      #cb-panel.open { transition: none; }
       .cb-typing span, .cb-msg { animation: none; }
     }
   `;
@@ -161,6 +202,13 @@
   var IG_ICON = '<svg width="20" viewBox="0 0 24 24" fill="#e1306c" aria-hidden="true"><path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zm0-2.163c-3.259 0-3.667.014-4.947.072-4.358.2-6.78 2.618-6.98 6.98-.059 1.281-.073 1.689-.073 4.948 0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98 1.281.058 1.689.072 4.948.072 3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98-1.281-.059-1.69-.073-4.949-.073zm0 5.838c-3.403 0-6.162 2.759-6.162 6.162s2.759 6.163 6.162 6.163 6.162-2.759 6.162-6.163c0-3.403-2.759-6.162-6.162-6.162zm0 10.162c-2.209 0-4-1.79-4-4 0-2.209 1.791-4 4-4s4 1.791 4 4c0 2.21-1.791 4-4 4zm6.406-11.845c-.796 0-1.441.645-1.441 1.44s.645 1.44 1.441 1.44c.795 0 1.439-.645 1.439-1.44s-.644-1.44-1.439-1.44z"/></svg>';
 
   var launcherEl, panelEl;
+
+  // Escape para texto que va a innerHTML (el HEADER puede venir de window.CHATBOT_HEADER).
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
 
   function buildWidget() {
     var root = document.createElement('div');
@@ -184,14 +232,13 @@
     panelEl = document.createElement('div');
     panelEl.id = 'cb-panel';
     panelEl.setAttribute('role', 'dialog');
-    panelEl.setAttribute('aria-modal', 'false');
     panelEl.setAttribute('aria-label', 'Chat de ayuda');
     panelEl.innerHTML = `
       <div id="cb-header">
-        <div class="cb-avatar" aria-hidden="true">💬</div>
+        <div class="cb-avatar" aria-hidden="true">${esc(HEADER.avatar)}</div>
         <div>
-          <div class="cb-title">Hola 👋</div>
-          <div class="cb-subtitle">Estamos para ayudarte</div>
+          <div class="cb-title">${esc(HEADER.title)}</div>
+          <div class="cb-subtitle">${esc(HEADER.subtitle)}</div>
         </div>
         <button id="cb-close" aria-label="Cerrar chat">✕</button>
       </div>
@@ -200,10 +247,10 @@
       <div id="cb-channels">
         <p>¿Continuamos por otro canal?</p>
         ${WHATSAPP_NUMBER ? `<a class="cb-channel-btn wa" id="cb-wa-btn" href="#" target="_blank" rel="noopener">${WA_ICON} Continuar por WhatsApp</a>` : ''}
-        ${INSTAGRAM_USER ? `<a class="cb-channel-btn ig" id="cb-ig-btn" href="https://ig.me/m/${INSTAGRAM_USER}" target="_blank" rel="noopener">${IG_ICON} Continuar por Instagram</a>` : ''}
+        ${INSTAGRAM_USER ? `<a class="cb-channel-btn ig" id="cb-ig-btn" href="https://ig.me/m/${encodeURIComponent(INSTAGRAM_USER)}" target="_blank" rel="noopener">${IG_ICON} Continuar por Instagram</a>` : ''}
       </div>
       <div id="cb-input-row">
-        <input id="cb-input" type="text" placeholder="Escribí tu mensaje..." autocomplete="off" aria-label="Tu mensaje" />
+        <input id="cb-input" type="text" placeholder="Escribí tu mensaje..." autocomplete="off" aria-label="Tu mensaje" maxlength="2000" />
         <button id="cb-send" aria-label="Enviar mensaje" disabled>${SEND_ICON}</button>
       </div>
     `;
@@ -216,6 +263,7 @@
 
   function openPanel() {
     panelEl.classList.add('open');
+    panelEl.setAttribute('aria-modal', 'true');
     launcherEl.setAttribute('aria-expanded', 'true');
     var b = document.getElementById('cb-badge');
     if (b) b.remove();
@@ -223,8 +271,32 @@
   }
   function closePanel() {
     panelEl.classList.remove('open');
+    panelEl.removeAttribute('aria-modal');
     launcherEl.setAttribute('aria-expanded', 'false');
     launcherEl.focus();
+  }
+
+  // Focus-trap básico: cicla Tab entre los elementos interactivos visibles del panel.
+  function focusables() {
+    var sel = '#cb-close, .cb-quick-chip, .cb-channel-btn, .cb-retry-btn, #cb-input, #cb-send';
+    return Array.prototype.filter.call(
+      panelEl.querySelectorAll(sel),
+      function (el) { return !el.disabled && el.offsetParent !== null; }
+    );
+  }
+  function trapFocus(e) {
+    if (e.key !== 'Tab' || !panelEl.classList.contains('open')) return;
+    var items = focusables();
+    if (!items.length) return;
+    var first = items[0];
+    var last = items[items.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
   }
 
   function bindEvents() {
@@ -237,6 +309,9 @@
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape' && panelEl.classList.contains('open')) closePanel();
     });
+
+    // Tab cicla dentro del panel mientras está abierto (focus-trap).
+    panelEl.addEventListener('keydown', trapFocus);
 
     var input = document.getElementById('cb-input');
     var sendBtn = document.getElementById('cb-send');
@@ -312,6 +387,8 @@
     if (quick) quick.innerHTML = '';
     input.value = '';
     document.getElementById('cb-send').disabled = true;
+    // Guardamos el texto antes del fetch: si la red falla no se pierde (item Reintentar).
+    var lastText = text;
     addMessage('user', text);
     messageCount++;
     showTyping();
@@ -333,8 +410,30 @@
       .catch(function () {
         removeTyping();
         addMessage('bot', 'Lo siento, hubo un error. Intentá de nuevo en un momento.');
+        showRetry(lastText);
       })
       .finally(function () { sending = false; });
+  }
+
+  // Tras un fallo de red ofrecemos reintentar: repuebla el input con el texto perdido.
+  function showRetry(lastText) {
+    var messages = document.getElementById('cb-messages');
+    var wrap = document.createElement('div');
+    wrap.className = 'cb-retry';
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'cb-retry-btn';
+    btn.textContent = '↻ Reintentar';
+    btn.addEventListener('click', function () {
+      wrap.remove();
+      var input = document.getElementById('cb-input');
+      input.value = lastText;
+      document.getElementById('cb-send').disabled = !lastText.trim();
+      input.focus();
+    });
+    wrap.appendChild(btn);
+    messages.appendChild(wrap);
+    scrollToBottom(messages);
   }
 
   function showChannelSuggestions() {

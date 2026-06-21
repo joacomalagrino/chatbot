@@ -18,11 +18,11 @@ class AdRequest(BaseModel):
 
 @router.post("/generate")
 @limiter.limit("10/minute")
-def generate(request: Request, payload: AdRequest):
+async def generate(request: Request, payload: AdRequest):
     if payload.project not in PROJECTS:
         raise HTTPException(status_code=400, detail=f"Proyecto inválido: {payload.project}")
 
-    result = generate_ad(
+    result = await generate_ad(
         project=payload.project,
         project_config=PROJECTS[payload.project],
         brief=payload.brief,

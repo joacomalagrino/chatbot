@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 import database
 import main
 import models
+import routers.ads as ads
 import routers.webhook as webhook
 import services.conversation_service as convsvc
 
@@ -83,6 +84,27 @@ def test_leads_requires_auth(client):
 
 def test_ads_requires_auth(client):
     assert client.post("/ads/generate", json={"project": "agencia", "brief": "x"}).status_code == 401
+
+
+def test_ads_generate_happy(client, monkeypatch):
+    async def fake_generate(project, project_config, brief, channel="ambos"):
+        return {"variantes": [{"titular": "Test", "texto_principal": "cuerpo"}]}
+
+    monkeypatch.setattr(ads, "generate_ad", fake_generate)
+    r = client.post("/ads/generate", headers=ADMIN,
+                    json={"project": "agencia", "brief": "0km financiados"})
+    assert r.status_code == 200
+    assert r.json()["variantes"][0]["titular"] == "Test"
+
+
+def test_ads_generate_model_error_is_502(client, monkeypatch):
+    async def fake_generate(project, project_config, brief, channel="ambos"):
+        return {"error": "Error del modelo (APIError)"}
+
+    monkeypatch.setattr(ads, "generate_ad", fake_generate)
+    r = client.post("/ads/generate", headers=ADMIN,
+                    json={"project": "agencia", "brief": "x"})
+    assert r.status_code == 502
 
 
 def test_leads_stats_requires_auth(client):

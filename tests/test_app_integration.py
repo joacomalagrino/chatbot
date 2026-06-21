@@ -353,6 +353,48 @@ def test_send_failure_does_not_break_processing(client, monkeypatch):
         db.close()
 
 
+def test_send_failure_does_not_skip_later_messages_in_batch(client, monkeypatch):
+    """Bug 4: el fallo de envío del 1er mensaje del batch NO debe abortar el procesamiento
+    de los siguientes. Sin _deliver (envío fuera de un try), la excepción del primer
+    send rompía el loop de `messages` y el 2do mensaje nunca se procesaba."""
+    fail_phone = "5491100003333"
+
+    async def send_first_fails(to, *args, **kwargs):
+        if to == fail_phone:
+            raise RuntimeError("Meta rechazó el envío al primero")
+        return {"ok": True}
+
+    monkeypatch.setattr(webhook, "send_whatsapp_message", send_first_fails)
+
+    # Un solo webhook con DOS mensajes (distinto remitente): el 1ro falla el envío.
+    body = json.dumps({
+        "entry": [{
+            "changes": [{
+                "field": "messages",
+                "value": {"messages": [
+                    {"id": "wamid.B1", "type": "text", "from": fail_phone,
+                     "text": {"body": "hola"}},
+                    {"id": "wamid.B2", "type": "text", "from": "5491100004444",
+                     "text": {"body": "buenas"}},
+                ]},
+            }],
+        }],
+    }).encode()
+    r = client.post("/webhook/meta", content=body, headers={"X-Hub-Signature-256": _sign(body)})
+    assert r.status_code == 200
+
+    db = database.SessionLocal()
+    try:
+        # Ambos mensajes se procesaron: 2 conversaciones, cada una con su turno (user+assistant).
+        convs = {c.session_id for c in db.query(models.Conversation).all()}
+        assert convs == {"wa_5491100003333", "wa_5491100004444"}
+        assert len(db.query(models.Message).all()) == 4
+        # Ambos eventos reclamados (idempotencia), incluido el que falló el envío.
+        assert db.query(models.ProcessedEvent).count() == 2
+    finally:
+        db.close()
+
+
 def test_hot_conversation_qualifies_lead(client):
     """Bug 5: al volverse 'hot' la conversación (phone + email), el lead pasa a 'qualified'."""
     body = json.dumps(_wa_payload("wamid.HOT", "5491133334444",

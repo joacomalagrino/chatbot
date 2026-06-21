@@ -1,4 +1,5 @@
 """Tests de integración del app (TestClient + SQLite + stubs de Claude/Meta)."""
+import asyncio
 import hashlib
 import hmac
 import json
@@ -12,6 +13,7 @@ import models
 import routers.ads as ads
 import routers.webhook as webhook
 import services.conversation_service as convsvc
+import services.meta_service as meta_service
 
 SECRET = "test-secret"
 ADMIN = {"Authorization": "Bearer test-admin"}
@@ -393,6 +395,27 @@ def test_send_failure_does_not_skip_later_messages_in_batch(client, monkeypatch)
         assert db.query(models.ProcessedEvent).count() == 2
     finally:
         db.close()
+
+
+def test_get_lead_data_rejects_non_numeric_id(monkeypatch):
+    """Seguridad: get_lead_data valida el leadgen_id (^[0-9]+$) antes de armar la URL.
+
+    Sin la validación, un id como '../foo' o 'me?x=' se interpolaría crudo en la URL
+    de Graph. El fetch debe abortar con ValueError sin tocar la red."""
+    def boom(*a, **k):  # si se intenta crear el cliente HTTP, falla el test
+        raise AssertionError("no debería llegar a la red con un id inválido")
+
+    monkeypatch.setattr(meta_service, "_get_client", boom)
+    for bad in ["../1234", "me", "123abc", "12 34", "", "12/34"]:
+        with pytest.raises(ValueError):
+            asyncio.run(meta_service.get_lead_data(bad))
+
+
+def test_docs_closed_in_prod(client):
+    """Seguridad: con dev=False (default), /docs y /openapi.json no se exponen."""
+    assert client.get("/docs").status_code == 404
+    assert client.get("/openapi.json").status_code == 404
+    assert client.get("/redoc").status_code == 404
 
 
 def test_hot_conversation_qualifies_lead(client):

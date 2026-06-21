@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 
 import httpx
 
@@ -9,6 +10,11 @@ from services.text_utils import normalize_ar_whatsapp
 logger = logging.getLogger(__name__)
 settings = get_settings()
 META_API_BASE = "https://graph.facebook.com/v21.0"
+
+# Los ids de Graph (leadgen_id, etc.) son numéricos. Validarlos antes de
+# interpolarlos en la URL evita path traversal/inyección si la firma del
+# webhook se relajara alguna vez (defensa en profundidad).
+_GRAPH_ID_RE = re.compile(r"^[0-9]+$")
 
 # Timeout granular: connect corto, read más largo (Graph puede tardar).
 _TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
@@ -99,6 +105,9 @@ async def get_lead_data(leadgen_id: str) -> dict:
     Requiere el permiso `leads_retrieval`. El token va por header Authorization.
     Ante error NO logueamos el body (trae field_data = nombre/teléfono/email del lead).
     """
+    if not _GRAPH_ID_RE.match(str(leadgen_id)):
+        logger.error("leadgen_id inválido (no numérico), abortando fetch")
+        raise ValueError("leadgen_id inválido")
     url = f"{META_API_BASE}/{leadgen_id}"
     headers = {"Authorization": f"Bearer {settings.meta_access_token}"}
     params = {"fields": "id,created_time,field_data,form_id,ad_id,campaign_id"}

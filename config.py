@@ -1,6 +1,7 @@
 import json
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,6 +10,9 @@ class Settings(BaseSettings):
 
     database_url: str
     anthropic_api_key: str
+
+    # Modo desarrollo (CHATBOT_DEV=1): expone /docs y /openapi.json. En prod queda cerrado.
+    dev: bool = Field(default=False, validation_alias="CHATBOT_DEV")
 
     # Meta / WhatsApp / Instagram
     meta_access_token: str = ""

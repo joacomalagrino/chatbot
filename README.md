@@ -53,7 +53,8 @@ Copiá `.env.example` a `.env` y completá las variables. Las más importantes:
 | `ANTHROPIC_API_KEY` | Llamadas a Claude (chat y anuncios). |
 | `ADMIN_API_KEY` | **Fail-closed**: sin esto, `/leads` y `/ads` devuelven 503. Se manda como `Authorization: Bearer <token>`. |
 | `META_VERIFY_TOKEN` | **Fail-closed**: sin esto el handshake del webhook devuelve 503. |
-| `META_APP_SECRET` | Habilita la validación de firma del webhook. Si falta, se acepta el webhook pero se loguea una advertencia. |
+| `META_APP_SECRET` | **Fail-closed**: valida la firma del webhook. Si falta, el webhook se rechaza con 403 (no se puede verificar el origen). Para desarrollo se puede abrir explícitamente con `ALLOW_UNSIGNED_WEBHOOKS=1`. |
+| `ALLOW_UNSIGNED_WEBHOOKS` | **Solo dev** (NO en prod): si vale `1` y falta `META_APP_SECRET`, acepta webhooks sin validar la firma. Por default `0` (fail-closed). |
 | `META_ACCESS_TOKEN` | Token de la Graph API para responder mensajes y traer datos de Lead Ads. |
 | `META_WHATSAPP_PHONE_ID`, `META_INSTAGRAM_ACCOUNT_ID` | IDs de los canales de Meta. |
 | `ALLOWED_ORIGINS` | CORS: dominios del widget separados por coma, o `*`. |
@@ -93,7 +94,9 @@ Las variables de entorno se cargan desde el panel de Railway.
 ## Notas de seguridad
 
 - `/leads` y `/ads` son fail-closed: sin `ADMIN_API_KEY` quedan cerrados.
-- El webhook valida la firma HMAC del body crudo cuando `META_APP_SECRET` está seteado.
+- El webhook es fail-closed: valida la firma HMAC del body crudo con `META_APP_SECRET`.
+  Si falta el secreto, rechaza con 403 salvo que se setee `ALLOW_UNSIGNED_WEBHOOKS=1`
+  (solo dev, nunca en prod).
 - Los errores de la Graph API se loguean sin volcar el body (puede traer PII del lead).
 - Headers de seguridad (nosniff, X-Frame-Options, Referrer-Policy, HSTS) y CSP estricta
   en `/admin`. Respuestas comprimidas con gzip.

@@ -33,7 +33,14 @@ async def lifespan(app: FastAPI):
     await meta_service.close_client()
 
 
-app = FastAPI(title="Chatbot Service", lifespan=lifespan)
+# En prod la doc interactiva queda cerrada; se abre solo en dev (CHATBOT_DEV=1).
+app = FastAPI(
+    title="Chatbot Service",
+    lifespan=lifespan,
+    docs_url="/docs" if settings.dev else None,
+    redoc_url=None,
+    openapi_url="/openapi.json" if settings.dev else None,
+)
 
 # Rate limiting (slowapi) por IP.
 app.state.limiter = limiter

@@ -62,8 +62,9 @@
   function initTabs() {
     document.querySelectorAll('.tab').forEach(function (tab) {
       tab.addEventListener('click', function () {
-        document.querySelectorAll('.tab').forEach(function (t) { t.classList.remove('active'); });
+        document.querySelectorAll('.tab').forEach(function (t) { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
         tab.classList.add('active');
+        tab.setAttribute('aria-selected', 'true');
         document.querySelectorAll('.section').forEach(function (s) { s.style.display = 'none'; });
         $('tab-' + tab.dataset.tab).style.display = 'block';
         if (tab.dataset.tab === 'resumen') loadStats();
@@ -103,7 +104,7 @@
       var v = bs[s[0]] || 0;
       var pct = Math.round((v / maxv) * 100);
       return '<div class="funnel-row"><div class="fname">' + s[1] + '</div>' +
-        '<div class="funnel-bar-track"><div class="funnel-bar bar-' + s[0] + '" data-w="' + pct + '">' + (v || '') + '</div></div>' +
+        '<div class="funnel-bar-track"><div class="funnel-bar bar-' + s[0] + '" data-w="' + pct + '"></div></div>' +
         '<div class="fpct">' + v + '</div></div>';
     }).join('');
 
@@ -174,7 +175,7 @@
     }).join('');
 
     content.innerHTML = '<div class="muted" style="margin-bottom:10px">' + leads.length + ' lead' + (leads.length > 1 ? 's' : '') + '</div>' +
-      '<table><thead><tr><th>Lead</th><th>Contacto</th><th>Estado</th><th>Cambiar</th><th>Fecha</th></tr></thead><tbody>' + rows + '</tbody></table>';
+      '<div class="table-scroll"><table><thead><tr><th>Lead</th><th>Contacto</th><th>Estado</th><th>Cambiar</th><th>Fecha</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
 
     // Toggle notas al click en la fila (sin disparar al usar el select).
     content.querySelectorAll('.lead-row.clickable').forEach(function (row) {

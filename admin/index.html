@@ -13,7 +13,7 @@
       <div class="logo">💬</div>
       <h2>Panel del Chatbot</h2>
       <p>Ingresá tu token de administrador para continuar.</p>
-      <input id="gate-token" type="password" placeholder="ADMIN_API_KEY" autocomplete="off" />
+      <input id="gate-token" type="password" placeholder="ADMIN_API_KEY" autocomplete="off" aria-label="Token de administrador" />
       <p class="hint">Es el valor de <code>ADMIN_API_KEY</code> en las variables del servidor.</p>
       <button class="btn-primary" id="gate-btn">Entrar</button>
       <div class="err" id="gate-err"></div>
@@ -28,19 +28,19 @@
   </header>
 
   <main style="display:none">
-    <div class="tabs">
-      <button class="tab active" data-tab="resumen">Resumen</button>
-      <button class="tab" data-tab="leads">Leads</button>
-      <button class="tab" data-tab="ads">Generar anuncios</button>
+    <div class="tabs" role="tablist">
+      <button class="tab active" id="tabbtn-resumen" data-tab="resumen" role="tab" aria-selected="true" aria-controls="tab-resumen">Resumen</button>
+      <button class="tab" id="tabbtn-leads" data-tab="leads" role="tab" aria-selected="false" aria-controls="tab-leads">Leads</button>
+      <button class="tab" id="tabbtn-ads" data-tab="ads" role="tab" aria-selected="false" aria-controls="tab-ads">Generar anuncios</button>
     </div>
 
     <!-- Resumen / dashboard -->
-    <section id="tab-resumen" class="section">
+    <section id="tab-resumen" class="section" role="tabpanel" aria-labelledby="tabbtn-resumen">
       <div id="dash"><div class="sk-row" style="height:96px;margin-bottom:14px"></div></div>
     </section>
 
     <!-- Leads -->
-    <section id="tab-leads" class="section" style="display:none">
+    <section id="tab-leads" class="section" role="tabpanel" aria-labelledby="tabbtn-leads" style="display:none">
       <div class="toolbar">
         <div>
           <label>Proyecto</label>
@@ -67,7 +67,7 @@
     </section>
 
     <!-- Anuncios -->
-    <section id="tab-ads" class="section" style="display:none">
+    <section id="tab-ads" class="section" role="tabpanel" aria-labelledby="tabbtn-ads" style="display:none">
       <div class="card">
         <div class="field">
           <label>Proyecto</label>

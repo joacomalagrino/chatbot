@@ -41,7 +41,10 @@ def update_lead_from_message(db: Session, conversation: Conversation, user_messa
         lead.status = "contacted"
 
     if lead.phone and (lead.email or lead.instagram):
+        # Conversación "caliente" (teléfono + email/instagram): el lead pasa a calificado.
+        # Ambas máquinas de estado se mueven juntas; antes el lead se quedaba en "contacted".
         conversation.status = "hot"
+        lead.status = "qualified"
 
     db.commit()
     return True

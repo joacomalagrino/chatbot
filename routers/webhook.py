@@ -43,10 +43,16 @@ def _valid_signature(body: bytes, header: str) -> bool:
     """Valida X-Hub-Signature-256 (HMAC-SHA256 del body crudo con el App Secret)."""
     secret = settings.meta_app_secret
     if not secret:
-        # Aún no configurado: se permite, pero se avisa fuerte. Configurar META_APP_SECRET
-        # en las variables de entorno habilita la validación de firma.
-        logger.warning("META_APP_SECRET no configurado: webhook SIN validación de firma")
-        return True
+        # Fail-closed: sin App Secret no se puede validar nada, así que se rechaza.
+        # Para dev se puede abrir explícitamente con ALLOW_UNSIGNED_WEBHOOKS=1; nunca por default.
+        if settings.allow_unsigned_webhooks:
+            logger.warning(
+                "META_APP_SECRET no configurado y ALLOW_UNSIGNED_WEBHOOKS activo: "
+                "webhook SIN validación de firma (modo dev)"
+            )
+            return True
+        logger.error("META_APP_SECRET no configurado: webhook rechazado (fail-closed)")
+        return False
     if not header.startswith("sha256="):
         return False
     expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
@@ -128,6 +134,41 @@ def _claim_event(db: Session, event_id: str) -> bool:
         return False
 
 
+def _release_event(db: Session, event_id: str) -> None:
+    """Libera un evento ya reclamado (revierte _claim_event) para permitir reintentos.
+
+    Se usa cuando, tras reclamar el evento, la persistencia posterior falla: sin esto
+    el evento quedaría marcado como procesado y el reintento de Meta se descartaría."""
+    if not event_id:
+        return
+    try:
+        db.query(ProcessedEvent).filter_by(event_id=event_id).delete()
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("No se pudo liberar el ProcessedEvent %s", event_id)
+
+
+async def _deliver(send_coro, channel: str, conversation_id) -> bool:
+    """Envía la respuesta capturando el fallo de envío en vez de tragarlo silenciosamente.
+
+    El claim del evento (idempotencia) ocurre antes del envío, así que si Meta nos
+    rechaza el envío el turno ya quedó persistido pero el usuario no recibió respuesta.
+    Como mínimo dejamos rastro EXPLÍCITO (no se pierde en el except global de
+    _process_event) para poder reintentar fuera de banda. Devuelve True si se entregó."""
+    try:
+        await send_coro
+        return True
+    except Exception:
+        logger.exception(
+            "ENVÍO NO ENTREGADO (channel=%s conversation=%s): respuesta generada y "
+            "persistida pero no enviada; requiere reintento fuera de banda",
+            channel,
+            conversation_id,
+        )
+        return False
+
+
 async def _handle_ig_event(db: Session, event: dict):
     msg = event.get("message", {})
     text = msg.get("text")
@@ -144,7 +185,7 @@ async def _handle_ig_event(db: Session, event: dict):
         db, f"ig_{ig_id}", project, "instagram", contact_instagram=ig_id
     )
     response_text = await record_turn(db, conversation, text)
-    await send_instagram_message(ig_id, response_text)
+    await _deliver(send_instagram_message(ig_id, response_text), "instagram", conversation.id)
 
 
 async def _handle_change(db: Session, change: dict):
@@ -169,7 +210,7 @@ async def _handle_change(db: Session, change: dict):
                 db, f"wa_{phone}", project, "whatsapp", contact_phone=phone
             )
             response_text = await record_turn(db, conversation, text)
-            await send_whatsapp_message(phone, response_text)
+            await _deliver(send_whatsapp_message(phone, response_text), "whatsapp", conversation.id)
 
     elif field == "leadgen":
         await _handle_lead_ad(db, value)
@@ -180,14 +221,19 @@ async def _handle_lead_ad(db: Session, value: dict):
     leadgen_id = value.get("leadgen_id")
     if not leadgen_id:
         return
-    if not _claim_event(db, f"lead_{leadgen_id}"):
-        return
 
     form_id = str(value.get("form_id", ""))
     project = _resolve_project(form_id, settings.lead_form_map(), DEFAULT_LEADFORM_PROJECT)
 
+    # Traer y parsear los datos del lead ANTES de reclamar el evento: si Graph falla
+    # acá, no se reclamó nada y Meta puede reintentar (no se pierde el lead).
     data = await get_lead_data(leadgen_id)
     fields = parse_lead_fields(data.get("field_data", []))
+
+    # Reclamar el evento recién ahora (idempotencia). Si ya estaba, salir.
+    event_id = f"lead_{leadgen_id}"
+    if not _claim_event(db, event_id):
+        return
 
     conversation = get_or_create_conversation(db, f"lead_{leadgen_id}", project, "lead_ad")
     conversation.status = "hot"
@@ -207,15 +253,20 @@ async def _handle_lead_ad(db: Session, value: dict):
     lead.name = name
     lead.email = email
     lead.phone = phone
-    lead.interests = fields
+    # interests como lista de strings "campo: valor": el panel lo renderiza como tags
+    # (.length/.map). Guardar el dict crudo hacía que nunca aparecieran las tags.
+    lead.interests = [f"{k}: {v}" for k, v in fields.items()]
     lead.status = "new"
     lead.notes = f"Vino de Lead Ad (form {form_id}, ad {value.get('ad_id', '?')})"
 
     try:
         db.commit()
     except IntegrityError:
+        # Falló la persistencia del Lead: liberar el ProcessedEvent reclamado para que
+        # un reintento de Meta pueda volver a procesar (si no, el lead se perdería).
         db.rollback()
         logger.exception("IntegrityError guardando Lead Ad")
+        _release_event(db, event_id)
         return
 
     logger.info("Lead Ad capturado (project=%s)", project)

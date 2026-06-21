@@ -75,8 +75,21 @@ def _serialize(l: Lead) -> dict:
         "phone": l.phone,
         "email": l.email,
         "instagram": l.instagram,
-        "interests": l.interests,
+        # interests: lista de strings (el panel espera .length/.map). Toleramos un dict
+        # legacy (leads guardados antes del fix) aplanándolo a "clave: valor".
+        "interests": _interests_list(l.interests),
         "notes": l.notes,
         "status": l.status,
         "created_at": l.created_at.isoformat() if l.created_at else None,
     }
+
+
+def _interests_list(interests) -> list[str]:
+    """Normaliza `interests` a lista de strings para el panel.
+
+    Acepta el formato nuevo (lista) y el legacy (dict {campo: valor})."""
+    if isinstance(interests, dict):
+        return [f"{k}: {v}" for k, v in interests.items()]
+    if isinstance(interests, list):
+        return [str(i) for i in interests]
+    return []

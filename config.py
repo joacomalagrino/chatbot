@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     meta_access_token: str = ""
     meta_verify_token: str = ""        # sin default público; setear en el entorno (fail-closed)
     meta_app_secret: str = ""          # para validar la firma del webhook (X-Hub-Signature-256)
+    allow_unsigned_webhooks: bool = False  # SOLO dev: aceptar webhooks sin firma si falta meta_app_secret
     meta_whatsapp_phone_id: str = ""
     meta_instagram_account_id: str = ""
 

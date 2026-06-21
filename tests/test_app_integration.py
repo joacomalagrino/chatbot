@@ -56,6 +56,17 @@ def _wa_payload(wamid: str, phone: str, text: str) -> dict:
     }
 
 
+def _lead_payload(leadgen_id: str, form_id: str = "FORM1") -> dict:
+    return {
+        "entry": [{
+            "changes": [{
+                "field": "leadgen",
+                "value": {"leadgen_id": leadgen_id, "form_id": form_id, "ad_id": "AD1"},
+            }],
+        }],
+    }
+
+
 # ───────────────────────────────── básicos ───────────────────────────────────
 
 def test_health(client):
@@ -208,3 +219,151 @@ def test_lead_status_update_rejects_invalid_status(client):
     r = client.patch("/leads/11111111-1111-1111-1111-111111111111/status",
                      headers=ADMIN, json={"status": "loquesea"})
     assert r.status_code == 422
+
+
+# ──────────────────── regresión: bugs confirmados ────────────────────────────
+
+def test_webhook_signature_fail_closed_without_secret(client, monkeypatch):
+    """Bug 1: sin META_APP_SECRET el webhook debe RECHAZAR (fail-closed), no aceptar."""
+    monkeypatch.setattr(webhook.settings, "meta_app_secret", "")
+    monkeypatch.setattr(webhook.settings, "allow_unsigned_webhooks", False)
+    body = json.dumps({"entry": []}).encode()
+    # Sin firma y sin secreto configurado -> 403.
+    assert client.post("/webhook/meta", content=body).status_code == 403
+    # Aun con una "firma" cualquiera, sin secreto no se puede validar -> 403.
+    r = client.post("/webhook/meta", content=body,
+                    headers={"X-Hub-Signature-256": "sha256=loquesea"})
+    assert r.status_code == 403
+
+
+def test_webhook_unsigned_allowed_only_with_explicit_flag(client, monkeypatch):
+    """Bug 1: el modo permisivo solo se habilita con ALLOW_UNSIGNED_WEBHOOKS explícito."""
+    monkeypatch.setattr(webhook.settings, "meta_app_secret", "")
+    monkeypatch.setattr(webhook.settings, "allow_unsigned_webhooks", True)
+    body = json.dumps({"entry": []}).encode()
+    assert client.post("/webhook/meta", content=body).status_code == 200
+
+
+def test_lead_ad_not_claimed_when_graph_fails(client, monkeypatch):
+    """Bug 2: si get_lead_data falla, NO se reclama el evento (el lead no se pierde)."""
+    async def boom(leadgen_id):
+        raise RuntimeError("Graph caído")
+
+    monkeypatch.setattr(webhook, "get_lead_data", boom)
+    body = json.dumps(_lead_payload("LEAD_FAIL")).encode()
+    # El POST devuelve 200 (proceso en background); el fallo no debe reclamar el evento.
+    client.post("/webhook/meta", content=body, headers={"X-Hub-Signature-256": _sign(body)})
+
+    db = database.SessionLocal()
+    try:
+        assert db.query(models.ProcessedEvent).filter_by(event_id="lead_LEAD_FAIL").first() is None
+        assert db.query(models.Lead).count() == 0
+    finally:
+        db.close()
+
+
+def test_lead_ad_can_be_reprocessed_after_failure(client, monkeypatch):
+    """Bug 2: tras un fallo de Graph, un reintento posterior debe poder persistir el lead."""
+    state = {"fail": True}
+
+    async def flaky(leadgen_id):
+        if state["fail"]:
+            raise RuntimeError("Graph caído")
+        return {"field_data": [
+            {"name": "full_name", "values": ["Juan Pérez"]},
+            {"name": "email", "values": ["juan@lead.com"]},
+            {"name": "phone_number", "values": ["+5491100000000"]},
+        ]}
+
+    monkeypatch.setattr(webhook, "get_lead_data", flaky)
+    body = json.dumps(_lead_payload("LEAD_RETRY")).encode()
+    sig = _sign(body)
+    client.post("/webhook/meta", content=body, headers={"X-Hub-Signature-256": sig})  # falla
+
+    state["fail"] = False
+    client.post("/webhook/meta", content=body, headers={"X-Hub-Signature-256": sig})  # reintento
+
+    db = database.SessionLocal()
+    try:
+        leads = db.query(models.Lead).all()
+        assert len(leads) == 1
+        assert leads[0].email == "juan@lead.com"
+    finally:
+        db.close()
+
+
+def test_lead_ad_interests_stored_as_list_of_strings(client, monkeypatch):
+    """Bug 3: interests se guarda como lista de strings (el panel la renderiza como tags)."""
+    async def fake_lead(leadgen_id):
+        return {"field_data": [
+            {"name": "full_name", "values": ["Ana"]},
+            {"name": "email", "values": ["ana@lead.com"]},
+            {"name": "modelo_interes", "values": ["SUV"]},
+        ]}
+
+    monkeypatch.setattr(webhook, "get_lead_data", fake_lead)
+    body = json.dumps(_lead_payload("LEAD_TAGS")).encode()
+    client.post("/webhook/meta", content=body, headers={"X-Hub-Signature-256": _sign(body)})
+
+    leads = client.get("/leads/", headers=ADMIN).json()
+    assert len(leads) == 1
+    interests = leads[0]["interests"]
+    assert isinstance(interests, list)
+    assert all(isinstance(i, str) for i in interests)
+    assert any("modelo_interes: SUV" == i for i in interests)
+
+
+def test_leads_serialize_tolerates_legacy_dict_interests(client):
+    """Bug 3: leads legacy con interests=dict se aplanan a lista al serializar."""
+    db = database.SessionLocal()
+    try:
+        conv = models.Conversation(session_id="legacy_1", project="agencia", channel="lead_ad")
+        db.add(conv)
+        db.commit()
+        db.add(models.Lead(conversation_id=conv.id, project="agencia",
+                           interests={"modelo": "SUV", "presupuesto": "20k"}))
+        db.commit()
+    finally:
+        db.close()
+
+    leads = client.get("/leads/", headers=ADMIN).json()
+    assert len(leads) == 1
+    interests = leads[0]["interests"]
+    assert isinstance(interests, list)
+    assert "modelo: SUV" in interests
+
+
+def test_send_failure_does_not_break_processing(client, monkeypatch):
+    """Bug 4: si el envío a Meta falla, el turno igual se persiste (visibilidad del fallo)."""
+    async def failing_send(*args, **kwargs):
+        raise RuntimeError("Meta rechazó el envío")
+
+    monkeypatch.setattr(webhook, "send_whatsapp_message", failing_send)
+    body = json.dumps(_wa_payload("wamid.SENDFAIL", "5491100002222", "hola")).encode()
+    r = client.post("/webhook/meta", content=body, headers={"X-Hub-Signature-256": _sign(body)})
+    assert r.status_code == 200
+
+    db = database.SessionLocal()
+    try:
+        # El turno (user + assistant) quedó persistido pese al fallo de envío.
+        assert len(db.query(models.Message).all()) == 2
+        # El evento quedó reclamado (no se reintenta automáticamente; se loguea para retry).
+        assert db.query(models.ProcessedEvent).count() == 1
+    finally:
+        db.close()
+
+
+def test_hot_conversation_qualifies_lead(client):
+    """Bug 5: al volverse 'hot' la conversación (phone + email), el lead pasa a 'qualified'."""
+    body = json.dumps(_wa_payload("wamid.HOT", "5491133334444",
+                                  "hola, mi tel es 1133334444 y mi mail es hot@test.com")).encode()
+    client.post("/webhook/meta", content=body, headers={"X-Hub-Signature-256": _sign(body)})
+
+    db = database.SessionLocal()
+    try:
+        conv = db.query(models.Conversation).filter_by(session_id="wa_5491133334444").first()
+        lead = db.query(models.Lead).first()
+        assert conv.status == "hot"
+        assert lead.status == "qualified"
+    finally:
+        db.close()

@@ -8,9 +8,9 @@ from services.text_utils import parse_model_json
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-# Cliente SYNC a propósito: el endpoint /ads/generate es `def` (corre en threadpool),
-# así que no bloquea el event loop. Si se pasa el endpoint a `async def`, migrar a AsyncAnthropic.
-client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=30.0, max_retries=2)
+# Cliente ASYNC: el endpoint /ads/generate es `async def`, así que la llamada a la API
+# se hace con await y no bloquea el event loop ni el threadpool.
+client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key, timeout=30.0, max_retries=2)
 
 AD_SYSTEM = """\
 Sos un copywriter publicitario experto en Meta Ads (Facebook e Instagram) para el mercado argentino.
@@ -43,7 +43,7 @@ Respondés ÚNICAMENTE con un JSON válido, sin texto adicional, con esta forma 
 """
 
 
-def generate_ad(project: str, project_config: dict, brief: str, channel: str = "ambos") -> dict:
+async def generate_ad(project: str, project_config: dict, brief: str, channel: str = "ambos") -> dict:
     """Genera 3 variantes de anuncio + sugerencia de público para un brief.
 
     brief: texto libre describiendo qué promocionar.
@@ -62,7 +62,7 @@ def generate_ad(project: str, project_config: dict, brief: str, channel: str = "
     )
 
     try:
-        response = client.messages.create(
+        response = await client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=1200,
             system=system,

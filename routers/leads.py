@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 from uuid import UUID
 
@@ -40,7 +40,7 @@ def lead_stats(db: Session = Depends(get_db)):
         .group_by(Conversation.channel).all()
     )
     total = db.query(func.count(Lead.id)).scalar() or 0
-    week_ago = datetime.utcnow() - timedelta(days=7)
+    week_ago = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=7)
     last_7d = db.query(func.count(Lead.id)).filter(Lead.created_at >= week_ago).scalar() or 0
     return {
         "total": total,

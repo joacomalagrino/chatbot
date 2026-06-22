@@ -14,6 +14,9 @@ from services.lead_service import update_lead_from_message
 
 logger = logging.getLogger(__name__)
 
+MAX_MESSAGE_CHARS = 4000     # cota del mensaje del usuario (el widget ya lo hace a 2000; el webhook no)
+MAX_HISTORY_MESSAGES = 40    # cuántos mensajes traer para el historial (claude_service recorta a 20)
+
 
 def get_or_create_conversation(
     db: Session, session_id: str, project: str, channel: str, **contacts
@@ -56,16 +59,23 @@ async def record_turn(db: Session, conversation: Conversation, text: str) -> str
     del mensaje recién creado (no por `[:-1]`), así no depende del orden por
     timestamp cuando dos mensajes comparten el mismo `created_at`.
     """
+    text = (text or "")[:MAX_MESSAGE_CHARS]   # cota en el chokepoint: cubre el webhook (que no capaba)
     user_msg = Message(conversation_id=conversation.id, role="user", content=text)
     db.add(user_msg)
     db.commit()
     db.refresh(conversation)
 
-    history = [
-        {"role": m.role, "content": m.content}
-        for m in conversation.messages
-        if m.id != user_msg.id
-    ]
+    # Traer SOLO los últimos N mensajes (claude_service recorta a 20): evita cargar TODA la
+    # conversación —que en WhatsApp persiste indefinidamente— para descartar casi todo.
+    recent = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation.id, Message.id != user_msg.id)
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(MAX_HISTORY_MESSAGES)
+        .all()
+    )
+    recent.reverse()
+    history = [{"role": m.role, "content": m.content} for m in recent]
 
     response_text = await get_ai_response(
         conversation.project, PROJECTS[conversation.project], text, history

@@ -2,6 +2,8 @@ import hashlib
 import hmac
 import json
 import logging
+import time
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
@@ -119,6 +121,36 @@ async def _process_event(body: dict):
         db.close()
 
 
+EVENT_TTL_DAYS = 7
+_PURGE_INTERVAL_S = 3600
+_last_purge = 0.0
+
+
+def purge_old_events(db: Session, days: int = EVENT_TTL_DAYS) -> int:
+    """Borra los processed_events más viejos que `days`. Meta no reintenta un webhook tras
+    horas, así que la idempotencia solo necesita una ventana corta; sin esto la tabla de
+    dedup crecía monótona para siempre. Devuelve cuántas filas borró."""
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
+    n = db.query(ProcessedEvent).filter(ProcessedEvent.created_at < cutoff).delete()
+    db.commit()
+    return n
+
+
+def _maybe_purge_events(db: Session) -> None:
+    """Dispara la purga a lo sumo 1x/hora por worker (throttle en memoria) para no correr el
+    DELETE en cada webhook. Idempotente entre workers (cada uno purga lo que ya purgó otro)."""
+    global _last_purge
+    now = time.monotonic()
+    if now - _last_purge < _PURGE_INTERVAL_S:
+        return
+    _last_purge = now
+    try:
+        purge_old_events(db)
+    except Exception:
+        db.rollback()
+        logger.exception("No se pudo purgar processed_events")
+
+
 def _claim_event(db: Session, event_id: str) -> bool:
     """Registra el id del evento. Devuelve True si es nuevo, False si ya se procesó."""
     if not event_id:
@@ -128,6 +160,7 @@ def _claim_event(db: Session, event_id: str) -> bool:
     db.add(ProcessedEvent(event_id=event_id))
     try:
         db.commit()
+        _maybe_purge_events(db)   # purga lazy y throttleada de eventos viejos
         return True
     except IntegrityError:
         db.rollback()

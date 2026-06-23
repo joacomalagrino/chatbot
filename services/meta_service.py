@@ -48,16 +48,32 @@ def _error_summary(r: httpx.Response) -> str:
         return "sin detalle"
 
 
-async def _post_with_retry(url: str, payload: dict, headers: dict, attempts: int = 3) -> dict:
-    """POST con reintentos y backoff exponencial para errores transitorios (429/5xx/red)."""
+async def _request_with_retry(
+    method: str,
+    url: str,
+    headers: dict,
+    attempts: int = 3,
+    payload: dict | None = None,
+    params: dict | None = None,
+) -> dict:
+    """Petición HTTP con reintentos y backoff exponencial para errores transitorios (429/5xx/red).
+
+    Soporta GET y POST (y cualquier método que acepte httpx.AsyncClient.request).
+    """
     client = _get_client()
     for i in range(attempts):
         last = i == attempts - 1
         try:
-            r = await client.post(url, json=payload, headers=headers)
+            r = await client.request(
+                method,
+                url,
+                headers=headers,
+                json=payload if method.upper() != "GET" else None,
+                params=params if method.upper() == "GET" else None,
+            )
         except (httpx.TransportError, httpx.TimeoutException):
             if last:
-                logger.exception("Meta POST falló por red/timeout en %s", url)
+                logger.exception("Meta %s falló por red/timeout en %s", method.upper(), url)
                 raise
             await asyncio.sleep(min(2 ** i, 8))
             continue
@@ -74,6 +90,12 @@ async def _post_with_retry(url: str, payload: dict, headers: dict, attempts: int
         return r.json()
 
     raise RuntimeError("unreachable")  # pragma: no cover
+
+
+# Alias de compatibilidad para los call-sites existentes.
+async def _post_with_retry(url: str, payload: dict, headers: dict, attempts: int = 3) -> dict:
+    """POST con reintentos — delega en _request_with_retry."""
+    return await _request_with_retry("POST", url, headers, attempts=attempts, payload=payload)
 
 
 async def send_whatsapp_message(phone: str, text: str) -> dict:
@@ -111,12 +133,7 @@ async def get_lead_data(leadgen_id: str) -> dict:
     url = f"{META_API_BASE}/{leadgen_id}"
     headers = {"Authorization": f"Bearer {settings.meta_access_token}"}
     params = {"fields": "id,created_time,field_data,form_id,ad_id,campaign_id"}
-    client = _get_client()
-    r = await client.get(url, params=params, headers=headers)
-    if not r.is_success:
-        logger.error("Meta lead fetch error %s (%s)", r.status_code, _error_summary(r))
-    r.raise_for_status()
-    return r.json()
+    return await _request_with_retry("GET", url, headers, params=params)
 
 
 def parse_lead_fields(field_data: list) -> dict:

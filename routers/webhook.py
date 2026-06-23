@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import hmac
 import json
@@ -124,6 +125,7 @@ async def _process_event(body: dict):
 EVENT_TTL_DAYS = 7
 _PURGE_INTERVAL_S = 3600
 _last_purge = 0.0
+_purge_lock = asyncio.Lock()
 
 
 def purge_old_events(db: Session, days: int = EVENT_TTL_DAYS) -> int:
@@ -136,14 +138,23 @@ def purge_old_events(db: Session, days: int = EVENT_TTL_DAYS) -> int:
     return n
 
 
-def _maybe_purge_events(db: Session) -> None:
+async def _maybe_purge_events(db: Session) -> None:
     """Dispara la purga a lo sumo 1x/hora por worker (throttle en memoria) para no correr el
-    DELETE en cada webhook. Idempotente entre workers (cada uno purga lo que ya purgó otro)."""
+    DELETE en cada webhook. Idempotente entre workers (cada uno purga lo que ya purgó otro).
+
+    El chequeo-y-actualización de _last_purge está protegido por _purge_lock para que
+    dos BackgroundTasks concurrentes no lancen la purga al mismo tiempo."""
     global _last_purge
     now = time.monotonic()
+    # Chequeo rápido sin lock para el camino caliente (evita contención en cada webhook).
     if now - _last_purge < _PURGE_INTERVAL_S:
         return
-    _last_purge = now
+    async with _purge_lock:
+        # Re-chequear dentro del lock: otro task pudo haber actualizado _last_purge
+        # justo antes de que adquiriéramos el lock.
+        if time.monotonic() - _last_purge < _PURGE_INTERVAL_S:
+            return
+        _last_purge = time.monotonic()
     try:
         purge_old_events(db)
     except Exception:
@@ -160,7 +171,16 @@ def _claim_event(db: Session, event_id: str) -> bool:
     db.add(ProcessedEvent(event_id=event_id))
     try:
         db.commit()
-        _maybe_purge_events(db)   # purga lazy y throttleada de eventos viejos
+        # Purga lazy: la lanzamos como tarea fire-and-forget si hay un event loop
+        # activo (i.e. cuando se llama desde dentro de _process_event). Si no hay
+        # loop (tests síncronos directos) simplemente se omite — la purga es
+        # best-effort y no afecta la idempotencia.
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(_maybe_purge_events(db))
+        except RuntimeError:
+            pass
         return True
     except IntegrityError:
         db.rollback()

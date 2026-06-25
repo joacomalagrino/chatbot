@@ -66,15 +66,23 @@
       position: fixed; bottom: 24px; right: 24px; z-index: 9999;
       width: 56px; height: 56px; border-radius: 50%;
       background: var(--cb-accent); border: none; cursor: pointer;
-      box-shadow: 0 4px 12px rgba(0,0,0,.25);
+      box-shadow: 0 6px 18px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.22);
       display: flex; align-items: center; justify-content: center;
-      transition: transform .2s;
+      transition: transform .2s, box-shadow .2s;
     }
-    #cb-launcher:hover { transform: scale(1.08); }
+    /* Anillo que late suave para invitar al clic (sutil; se apaga con reduced-motion). */
+    #cb-launcher::before {
+      content: ""; position: absolute; inset: -3px; border-radius: 50%;
+      border: 2px solid var(--cb-accent); pointer-events: none;
+      animation: cb-pulse 2.8s ease-out infinite;
+    }
+    @keyframes cb-pulse { 0% { transform: scale(.86); opacity: .55; } 70%, 100% { transform: scale(1.5); opacity: 0; } }
+    #cb-launcher:hover { transform: scale(1.08); box-shadow: 0 10px 26px rgba(0,0,0,.3), inset 0 1px 0 rgba(255,255,255,.22); }
     #cb-launcher:focus-visible { outline: 3px solid var(--cb-accent); outline-offset: 3px; }
     #cb-launcher svg { width: 28px; height: 28px; fill: #fff; }
     #cb-launcher.cb-swap svg { animation: cb-icon-in .2s ease; }
     @keyframes cb-icon-in { from { transform: rotate(-90deg); opacity: .4; } to { transform: none; opacity: 1; } }
+    @media (prefers-reduced-motion: reduce) { #cb-launcher::before { animation: none; opacity: 0; } }
 
     #cb-panel {
       position: fixed; bottom: 92px; right: 24px; z-index: 9998;

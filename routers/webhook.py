@@ -21,6 +21,7 @@ from services.meta_service import (
     send_instagram_message,
     send_whatsapp_message,
 )
+from services.notify import fire_hot_lead
 
 router = APIRouter()
 settings = get_settings()
@@ -138,9 +139,13 @@ def purge_old_events(db: Session, days: int = EVENT_TTL_DAYS) -> int:
     return n
 
 
-async def _maybe_purge_events(db: Session) -> None:
+async def _maybe_purge_events() -> None:
     """Dispara la purga a lo sumo 1x/hora por worker (throttle en memoria) para no correr el
     DELETE en cada webhook. Idempotente entre workers (cada uno purga lo que ya purgó otro).
+
+    Abre su PROPIA sesión: NO hereda la del request, que es fire-and-forget y podría
+    ya estar cerrada cuando esta tarea corre (use-after-close), o estar siendo usada por
+    otra query (la Session de SQLAlchemy no es segura para uso concurrente).
 
     El chequeo-y-actualización de _last_purge está protegido por _purge_lock para que
     dos BackgroundTasks concurrentes no lancen la purga al mismo tiempo."""
@@ -155,11 +160,14 @@ async def _maybe_purge_events(db: Session) -> None:
         if time.monotonic() - _last_purge < _PURGE_INTERVAL_S:
             return
         _last_purge = time.monotonic()
+    db = SessionLocal()
     try:
         purge_old_events(db)
     except Exception:
         db.rollback()
         logger.exception("No se pudo purgar processed_events")
+    finally:
+        db.close()
 
 
 def _claim_event(db: Session, event_id: str) -> bool:
@@ -172,13 +180,12 @@ def _claim_event(db: Session, event_id: str) -> bool:
     try:
         db.commit()
         # Purga lazy: la lanzamos como tarea fire-and-forget si hay un event loop
-        # activo (i.e. cuando se llama desde dentro de _process_event). Si no hay
-        # loop (tests síncronos directos) simplemente se omite — la purga es
-        # best-effort y no afecta la idempotencia.
+        # corriendo (i.e. cuando se llama desde dentro de _process_event). Si no hay
+        # loop (tests síncronos directos) get_running_loop lanza RuntimeError y se
+        # omite — la purga es best-effort y no afecta la idempotencia. La tarea abre
+        # su propia sesión (no le pasamos `db`, que es del request).
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(_maybe_purge_events(db))
+            asyncio.get_running_loop().create_task(_maybe_purge_events())
         except RuntimeError:
             pass
         return True
@@ -224,14 +231,20 @@ async def _deliver(send_coro, channel: str, conversation_id) -> bool:
 
 async def _handle_ig_event(db: Session, event: dict):
     msg = event.get("message", {})
+    # Echo: Meta reenvía NUESTROS propios mensajes salientes como evento. Si no se
+    # filtran, el bot se contestaría a sí mismo en loop. Descartar antes de todo.
+    if msg.get("is_echo"):
+        return
     text = msg.get("text")
     if not text:
         return
-    mid = msg.get("mid")
-    if not _claim_event(db, f"ig_{mid}" if mid else ""):
-        return
     ig_id = event.get("sender", {}).get("id")
     if not ig_id:
+        return
+    # Reclamar el evento DESPUÉS de validar que es procesable: si lo reclamáramos antes
+    # y faltara el sender, un reintento válido de Meta quedaría descartado.
+    mid = msg.get("mid")
+    if not _claim_event(db, f"ig_{mid}" if mid else ""):
         return
     project = _resolve_project("", {}, DEFAULT_INSTAGRAM_PROJECT)
     conversation = get_or_create_conversation(
@@ -252,11 +265,13 @@ async def _handle_change(db: Session, change: dict):
             text = (msg.get("text") or {}).get("body")
             if not text:
                 continue
-            wamid = msg.get("id")
-            if not _claim_event(db, f"wa_{wamid}" if wamid else ""):
-                continue
             phone = msg.get("from")
             if not phone:
+                continue
+            # Reclamar DESPUÉS de validar 'from': si reclamáramos antes y faltara,
+            # un reintento válido de Meta (mismo wamid) quedaría descartado.
+            wamid = msg.get("id")
+            if not _claim_event(db, f"wa_{wamid}" if wamid else ""):
                 continue
             project = _resolve_project(phone, settings.wa_number_map(), DEFAULT_WHATSAPP_PROJECT)
             conversation = get_or_create_conversation(
@@ -323,3 +338,8 @@ async def _handle_lead_ad(db: Session, value: dict):
         return
 
     logger.info("Lead Ad capturado (project=%s)", project)
+    # Un Lead Ad entra directo como caliente → avisar al equipo.
+    fire_hot_lead({
+        "project": project, "channel": "lead_ad",
+        "name": name, "phone": phone, "email": email,
+    })

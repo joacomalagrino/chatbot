@@ -52,7 +52,7 @@ class ProcessedEvent(Base):
     __tablename__ = "processed_events"
 
     event_id = Column(String(200), primary_key=True)
-    created_at = Column(DateTime, default=_utcnow)
+    created_at = Column(DateTime, default=_utcnow, index=True)  # la purga filtra por aquí
 
 
 class Lead(Base):

@@ -1,6 +1,7 @@
 from sqlalchemy.orm import Session
 
 from models import Conversation, Lead
+from services.notify import fire_hot_lead
 from services.text_utils import extract_contact
 
 
@@ -36,6 +37,8 @@ def update_lead_from_message(db: Session, conversation: Conversation, user_messa
     if not changed:
         return False
 
+    was_hot = conversation.status == "hot"
+
     if conversation.status == "new":
         conversation.status = "warm"
         lead.status = "contacted"
@@ -47,4 +50,16 @@ def update_lead_from_message(db: Session, conversation: Conversation, user_messa
         lead.status = "qualified"
 
     db.commit()
+
+    # Notificar al equipo SOLO en la transición a caliente (no en cada mensaje posterior).
+    if not was_hot and conversation.status == "hot":
+        fire_hot_lead({
+            "project": conversation.project,
+            "channel": conversation.channel,
+            "name": lead.name,
+            "phone": lead.phone,
+            "email": lead.email,
+            "instagram": lead.instagram,
+        })
+
     return True

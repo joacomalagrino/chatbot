@@ -30,11 +30,14 @@
 
   // ── Gate ──
   function showApp() {
-    $('gate').style.display = 'none';
-    document.querySelector('header').style.display = 'flex';
-    document.querySelector('main').style.display = 'block';
+    $('gate').classList.add('hidden');
+    document.querySelector('header').classList.remove('hidden');
+    document.querySelector('main').classList.remove('hidden');
     loadStats();
     loadLeads();
+    // Foco a la primera tab tras login OK (accesibilidad: el flujo de teclado sigue).
+    var first = document.querySelector('.tab');
+    if (first) first.focus();
   }
   function tryLogin(token) {
     return fetch('/leads/stats', { headers: { 'Authorization': 'Bearer ' + token } }).then(function (r) {
@@ -59,15 +62,32 @@
   }
 
   // ── Tabs ──
+  // Patrón ARIA tablist: una sola tab es foco-able (roving tabindex); ←/→ mueven y activan.
+  function tabList() { return Array.prototype.slice.call(document.querySelectorAll('.tab')); }
+  function activateTab(tab, focus) {
+    tabList().forEach(function (t) {
+      var on = t === tab;
+      t.classList.toggle('active', on);
+      t.setAttribute('aria-selected', on ? 'true' : 'false');
+      t.tabIndex = on ? 0 : -1;
+    });
+    document.querySelectorAll('.section').forEach(function (s) { s.classList.add('hidden'); });
+    $('tab-' + tab.dataset.tab).classList.remove('hidden');
+    if (focus) tab.focus();
+    if (tab.dataset.tab === 'resumen') loadStats();
+  }
   function initTabs() {
-    document.querySelectorAll('.tab').forEach(function (tab) {
-      tab.addEventListener('click', function () {
-        document.querySelectorAll('.tab').forEach(function (t) { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
-        tab.classList.add('active');
-        tab.setAttribute('aria-selected', 'true');
-        document.querySelectorAll('.section').forEach(function (s) { s.style.display = 'none'; });
-        $('tab-' + tab.dataset.tab).style.display = 'block';
-        if (tab.dataset.tab === 'resumen') loadStats();
+    var tabs = tabList();
+    tabs.forEach(function (tab, i) {
+      tab.tabIndex = tab.classList.contains('active') ? 0 : -1;
+      tab.addEventListener('click', function () { activateTab(tab); });
+      tab.addEventListener('keydown', function (e) {
+        var next = null;
+        if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = tabs[(i + 1) % tabs.length];
+        else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = tabs[(i - 1 + tabs.length) % tabs.length];
+        else if (e.key === 'Home') next = tabs[0];
+        else if (e.key === 'End') next = tabs[tabs.length - 1];
+        if (next) { e.preventDefault(); activateTab(next, true); }
       });
     });
   }
@@ -131,12 +151,22 @@
   function skeleton(n) {
     var s = ''; for (var i = 0; i < n; i++) s += '<div class="sk-row"></div>'; return s;
   }
-  function loadLeads() {
+  // Arma el querystring de filtros activos (lo comparten /leads/ y /leads/export.csv).
+  function leadsQuery() {
     var proj = $('filter-project').value, status = $('filter-status').value;
-    var qs = []; if (proj) qs.push('project=' + encodeURIComponent(proj)); if (status) qs.push('status=' + encodeURIComponent(status));
+    var q = $('filter-q').value.trim(), sort = $('filter-sort').value;
+    var qs = [];
+    if (proj) qs.push('project=' + encodeURIComponent(proj));
+    if (status) qs.push('status=' + encodeURIComponent(status));
+    if (q) qs.push('q=' + encodeURIComponent(q));
+    if (sort && sort !== 'recent') qs.push('sort=' + encodeURIComponent(sort));
+    return qs.join('&');
+  }
+  function loadLeads() {
     var content = $('leads-content');
     content.innerHTML = skeleton(5);
-    api('/leads/' + (qs.length ? '?' + qs.join('&') : ''))
+    var qs = leadsQuery();
+    api('/leads/' + (qs ? '?' + qs : ''))
       .then(function (r) { if (!r.ok) throw new Error('Error ' + r.status); return r.json(); })
       .then(renderLeads)
       .catch(function (e) {
@@ -153,6 +183,7 @@
         '<span class="muted">Aparecen acá cuando alguien deja sus datos en el chat o un anuncio.</span></div>';
       return;
     }
+    var COLS = 6;
     var rows = leads.map(function (l, idx) {
       var contact = [l.phone, l.email, l.instagram ? '@' + l.instagram : ''].filter(Boolean).map(esc).join('<br>');
       var tags = (l.interests && l.interests.length)
@@ -163,33 +194,99 @@
         return '<option value="' + s + '"' + (s === l.status ? ' selected' : '') + '>' + STATUS_LABEL[s] + '</option>';
       }).join('');
       var date = l.created_at ? new Date(l.created_at).toLocaleDateString('es-AR', { day: '2-digit', month: 'short' }) : '';
-      var main = '<tr class="lead-row' + (l.notes ? ' clickable' : '') + '" data-idx="' + idx + '">' +
-        '<td><div class="name">' + esc(l.name || '—') + '</div><div class="proj">' + esc(l.project) + '</div>' + tags + '</td>' +
+      // El chevron solo aparece si hay notas (afford de expandir); si no, va el nombre suelto.
+      var nameCell = l.notes
+        ? '<div class="name expander"><span class="chev" aria-hidden="true">▸</span>' + esc(l.name || '—') + '</div>'
+        : '<div class="name">' + esc(l.name || '—') + '</div>';
+      var main = '<tr class="lead-row' + (l.notes ? ' clickable' : '') + '" data-idx="' + idx + '"' +
+        (l.notes ? ' title="Click para ver notas"' : '') + '>' +
+        '<td>' + nameCell + '<div class="proj">' + esc(l.project) + '</div>' + tags + '</td>' +
         '<td>' + (contact || '<span class="muted">—</span>') + '</td>' +
         '<td><span class="chip ' + esc(l.status) + '">' + (STATUS_LABEL[l.status] || esc(l.status)) + '</span></td>' +
-        '<td><select class="status-sel" data-id="' + esc(l.id) + '">' + opts + '</select></td>' +
-        '<td class="muted">' + esc(date) + '</td></tr>';
-      var notes = l.notes ? '<tr class="notes-row" data-notes="' + idx + '" style="display:none"><td colspan="5">' +
+        '<td><select class="status-sel" data-id="' + esc(l.id) + '" aria-label="Cambiar estado del lead">' + opts + '</select></td>' +
+        '<td class="muted">' + esc(date) + '</td>' +
+        '<td><div class="lead-actions"><button class="btn-mini transcript-btn" data-id="' + esc(l.id) + '" data-idx="' + idx + '"' +
+          ' aria-expanded="false">💬 Ver conversación</button></div></td></tr>';
+      var notes = l.notes ? '<tr class="notes-row hidden" data-notes="' + idx + '"><td colspan="' + COLS + '">' +
         '<div class="nlabel">Notas</div>' + esc(l.notes) + '</td></tr>' : '';
-      return main + notes;
+      var transcript = '<tr class="transcript-row hidden" data-transcript="' + idx + '"><td colspan="' + COLS + '"></td></tr>';
+      return main + notes + transcript;
     }).join('');
 
-    content.innerHTML = '<div class="muted" style="margin-bottom:10px">' + leads.length + ' lead' + (leads.length > 1 ? 's' : '') + '</div>' +
-      '<div class="table-scroll"><table><thead><tr><th>Lead</th><th>Contacto</th><th>Estado</th><th>Cambiar</th><th>Fecha</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+    content.innerHTML = '<div class="muted leads-count">' + leads.length + ' lead' + (leads.length > 1 ? 's' : '') + '</div>' +
+      '<div class="table-scroll"><table><thead><tr><th>Lead</th><th>Contacto</th><th>Estado</th><th>Cambiar</th><th>Fecha</th><th>Conversación</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
 
-    // Toggle notas al click en la fila (sin disparar al usar el select).
+    // Toggle notas al click en la fila (sin disparar al usar el select o el botón de conversación).
     content.querySelectorAll('.lead-row.clickable').forEach(function (row) {
       row.addEventListener('click', function (e) {
-        if (e.target.closest('select')) return;
+        if (e.target.closest('select') || e.target.closest('button')) return;
         var nr = content.querySelector('.notes-row[data-notes="' + row.dataset.idx + '"]');
-        if (nr) nr.style.display = nr.style.display === 'none' ? 'table-row' : 'none';
+        if (nr) { nr.classList.toggle('hidden'); row.classList.toggle('is-open', !nr.classList.contains('hidden')); }
       });
+    });
+    // Botón "Ver conversación": carga el transcript en una fila expandible.
+    content.querySelectorAll('.transcript-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () { toggleTranscript(btn, content); });
     });
     // Cambio de estado optimista.
     content.querySelectorAll('.status-sel').forEach(function (sel) {
       sel.dataset.prev = sel.value;
       sel.addEventListener('change', function () { updateStatus(sel); });
     });
+  }
+
+  // ── Transcript ──
+  var CHANNEL_LABEL = { web: 'Web', whatsapp: 'WhatsApp', instagram: 'Instagram', facebook: 'Facebook' };
+  function fmtTime(s) {
+    if (!s) return '';
+    var d = new Date(s);
+    if (isNaN(d)) return '';
+    return d.toLocaleString('es-AR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+  }
+  function toggleTranscript(btn, content) {
+    var idx = btn.dataset.idx;
+    var row = content.querySelector('.transcript-row[data-transcript="' + idx + '"]');
+    if (!row) return;
+    var cell = row.firstElementChild;
+    var open = !row.classList.contains('hidden');
+    if (open) {  // ya estaba abierto -> colapsar
+      row.classList.add('hidden');
+      btn.setAttribute('aria-expanded', 'false');
+      return;
+    }
+    row.classList.remove('hidden');
+    btn.setAttribute('aria-expanded', 'true');
+    if (row.dataset.loaded) return;  // ya cargado, solo re-mostramos
+    cell.innerHTML = '<div class="tr-loading"><span class="spinner"></span> Cargando conversación…</div>';
+    api('/leads/' + btn.dataset.id + '/messages')
+      .then(function (r) { if (!r.ok) throw new Error('Error ' + r.status); return r.json(); })
+      .then(function (data) {
+        row.dataset.loaded = '1';
+        renderTranscript(cell, data);
+      })
+      .catch(function (e) {
+        if (e.message === '401') return;
+        cell.innerHTML = '<div class="error-box">No se pudo cargar la conversación (' + esc(e.message) + ')' +
+          '<br><button class="btn-ghost tr-retry">↻ Reintentar</button></div>';
+        var rb = cell.querySelector('.tr-retry');
+        if (rb) rb.addEventListener('click', function () { delete row.dataset.loaded; row.classList.add('hidden'); toggleTranscript(btn, content); });
+      });
+  }
+  function renderTranscript(cell, data) {
+    var msgs = (data && data.messages) || [];
+    if (!msgs.length) {
+      cell.innerHTML = '<div class="tr-loading">Esta conversación todavía no tiene mensajes.</div>';
+      return;
+    }
+    var ch = CHANNEL_LABEL[data.channel] || (data.channel ? esc(data.channel) : '');
+    var head = '<div class="tr-head">Conversación' + (ch ? ' · ' + ch : '') + '</div>';
+    var bubbles = msgs.map(function (m) {
+      var role = m.role === 'user' ? 'user' : 'assistant';
+      var t = fmtTime(m.created_at);
+      return '<div class="tr-bubble ' + role + '">' + esc(m.content) +
+        (t ? '<span class="tr-time">' + esc(t) + '</span>' : '') + '</div>';
+    }).join('');
+    cell.innerHTML = head + '<div class="transcript">' + bubbles + '</div>';
   }
   function updateStatus(sel) {
     var prev = sel.dataset.prev, next = sel.value, id = sel.dataset.id;
@@ -208,6 +305,32 @@
     });
   }
 
+  // ── Export CSV ──
+  // Un <a href> NO manda el Bearer, así que descargamos por fetch + blob y respetamos
+  // los filtros activos (project/status/q/sort).
+  function exportCsv() {
+    var btn = $('export-csv');
+    if (btn.disabled) return;
+    var prev = btn.textContent;
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Exportando…';
+    var qs = leadsQuery();
+    api('/leads/export.csv' + (qs ? '?' + qs : ''))
+      .then(function (r) { if (!r.ok) throw new Error('Error ' + r.status); return r.blob(); })
+      .then(function (blob) {
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = 'leads-' + new Date().toISOString().slice(0, 10) + '.csv';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        toast('CSV descargado');
+      })
+      .catch(function (e) { if (e.message !== '401') toast('No se pudo exportar el CSV', true); })
+      .finally(function () { btn.disabled = false; btn.textContent = prev; });
+  }
+
   // ── Ads ──
   function doGenerate() {
     var btn = $('ad-generate'), err = $('ad-err'), results = $('ad-results');
@@ -216,7 +339,7 @@
     if (!brief) { err.textContent = 'Escribí qué querés promocionar.'; return; }
     btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Generando…';
     results.innerHTML = '<div class="grid">' +
-      '<div class="sk-row" style="height:150px"></div>'.repeat(3) + '</div>';
+      '<div class="sk-row sk-row-ad"></div>'.repeat(3) + '</div>';
     api('/ads/generate', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ project: $('ad-project').value, brief: brief, channel: $('ad-channel').value }),
@@ -235,7 +358,7 @@
         '<span class="cta">' + esc(v.cta) + '</span></div>';
     }).join('');
     var pub = data.publico_sugerido || {};
-    var aud = '<div class="card" style="margin-top:16px"><div class="section-title">Público sugerido</div>' +
+    var aud = '<div class="card aud-card"><div class="section-title">Público sugerido</div>' +
       '<div class="muted">Edad: ' + esc(pub.edad || '—') + ' · Ubicación: ' + esc(pub.ubicacion || '—') + '<br>' +
       'Intereses: ' + esc((pub.intereses || []).join(', ')) + '<br>' +
       'Presupuesto sugerido: ' + esc(data.presupuesto_sugerido_ars_dia || '—') + ' /día</div></div>';
@@ -248,17 +371,29 @@
     });
   }
 
+  // Debounce genérico (para la búsqueda: no pegamos al backend en cada tecla).
+  function debounce(fn, ms) {
+    var t;
+    return function () { clearTimeout(t); t = setTimeout(fn, ms); };
+  }
+
   // ── Init ──
   $('gate-btn').addEventListener('click', doLogin);
   $('gate-token').addEventListener('keydown', function (e) { if (e.key === 'Enter') doLogin(); });
   $('logout').addEventListener('click', function () { sessionStorage.removeItem('cb_admin_token'); location.reload(); });
   $('reload').addEventListener('click', loadLeads);
+  $('export-csv').addEventListener('click', exportCsv);
   $('filter-project').addEventListener('change', loadLeads);
   $('filter-status').addEventListener('change', loadLeads);
+  $('filter-sort').addEventListener('change', loadLeads);
+  $('filter-q').addEventListener('input', debounce(loadLeads, 300));
   $('ad-generate').addEventListener('click', doGenerate);
   initTabs();
 
   if (TOKEN) {
     tryLogin(TOKEN).then(showApp).catch(function () { sessionStorage.removeItem('cb_admin_token'); });
+  } else {
+    // Foco al input del gate al cargar (accesibilidad: el usuario teclea el token sin clickear).
+    $('gate-token').focus();
   }
 })();

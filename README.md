@@ -32,7 +32,8 @@ panel /admin ─▶ /leads, /ads (requieren ADMIN_API_KEY)
 - `routers/webhook.py` — webhook de Meta (`GET/POST /webhook/meta`): verifica el
   handshake, valida la firma `X-Hub-Signature-256`, descarta reintentos (idempotencia
   por id de evento) y procesa WhatsApp / Instagram / Lead Ads en segundo plano.
-- `routers/leads.py` — listado, métricas y cambio de estado de leads (internos).
+- `routers/leads.py` — listado (con búsqueda `q` y `sort`), métricas (incluida tasa de
+  conversión), export CSV, transcript de conversación y cambio de estado de leads (internos).
 - `routers/ads.py` — generación de anuncios con Claude (interno).
 - `services/` — Claude (chat y anuncios), Meta Graph API, lógica de conversación y
   lead, y utilidades de texto puras (`text_utils.py`).
@@ -59,6 +60,7 @@ Copiá `.env.example` a `.env` y completá las variables. Las más importantes:
 | `META_WHATSAPP_PHONE_ID`, `META_INSTAGRAM_ACCOUNT_ID` | IDs de los canales de Meta. |
 | `ALLOWED_ORIGINS` | CORS: dominios del widget separados por coma, o `*`. |
 | `WHATSAPP_NUMBER_TO_PROJECT`, `LEAD_FORM_TO_PROJECT` | Ruteo opcional (JSON) de número/formulario a proyecto. Si vacío, todo cae en `agencia`. |
+| `NOTIFY_WEBHOOK_URL` | Opcional: webhook (Slack/Discord/Make/etc.) para avisar cuando entra un lead caliente. Vacío = solo log. |
 
 ## Correr en local
 
@@ -70,7 +72,7 @@ CHATBOT_DEV=1 python main.py        # http://localhost:8000
 uvicorn main:app --reload
 ```
 
-- Health check: `GET /health`
+- Health check (liveness): `GET /health` · readiness con chequeo de DB: `GET /health/ready`
 - Docs interactivas: `GET /docs`
 - Widget de demo: `GET /widget/demo.html`
 - Panel admin: `GET /admin/` (pide el `ADMIN_API_KEY`)

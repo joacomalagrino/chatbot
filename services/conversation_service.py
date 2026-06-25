@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from config import PROJECTS
 from models import Conversation, Message
-from services.claude_service import get_ai_response
+from services.claude_service import get_ai_response, stream_ai_response
 from services.lead_service import update_lead_from_message
 
 logger = logging.getLogger(__name__)
@@ -86,3 +86,41 @@ async def record_turn(db: Session, conversation: Conversation, text: str) -> str
 
     update_lead_from_message(db, conversation, text)
     return response_text
+
+
+async def stream_turn(db: Session, conversation: Conversation, text: str):
+    """Variante streaming de record_turn: async generator que yieldea cada delta de la
+    respuesta a medida que Claude la genera.
+
+    Persiste el mensaje del usuario igual que record_turn (cap de chars + history filtrado
+    por id), itera stream_ai_response acumulando el texto completo, y recién cuando el stream
+    termina persiste el Message del asistente con el texto completo y actualiza el lead. NO
+    modifica record_turn (que sigue para el webhook y el /chat no-streaming)."""
+    text = (text or "")[:MAX_MESSAGE_CHARS]   # mismo cap en el chokepoint que record_turn
+    user_msg = Message(conversation_id=conversation.id, role="user", content=text)
+    db.add(user_msg)
+    db.commit()
+    db.refresh(conversation)
+
+    recent = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation.id, Message.id != user_msg.id)
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(MAX_HISTORY_MESSAGES)
+        .all()
+    )
+    recent.reverse()
+    history = [{"role": m.role, "content": m.content} for m in recent]
+
+    parts = []
+    async for delta in stream_ai_response(
+        conversation.project, PROJECTS[conversation.project], text, history
+    ):
+        parts.append(delta)
+        yield delta
+
+    response_text = "".join(parts)
+    db.add(Message(conversation_id=conversation.id, role="assistant", content=response_text))
+    db.commit()
+
+    update_lead_from_message(db, conversation, text)

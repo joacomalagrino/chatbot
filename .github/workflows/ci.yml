@@ -17,3 +17,8 @@ jobs:
         run: pip install -r requirements-dev.txt
       - name: Correr tests
         run: pytest -q
+      - name: Auditar dependencias por CVEs (informativo, no bloquea)
+        continue-on-error: true
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt

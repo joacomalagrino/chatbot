@@ -20,14 +20,14 @@
     </div>
   </div>
 
-  <header style="display:none">
+  <header class="hidden">
     <h1>💬 Chatbot</h1>
     <span class="badge">panel</span>
     <div class="spacer"></div>
     <button class="btn-ghost" id="logout">Salir</button>
   </header>
 
-  <main style="display:none">
+  <main class="hidden">
     <div class="tabs" role="tablist">
       <button class="tab active" id="tabbtn-resumen" data-tab="resumen" role="tab" aria-selected="true" aria-controls="tab-resumen">Resumen</button>
       <button class="tab" id="tabbtn-leads" data-tab="leads" role="tab" aria-selected="false" aria-controls="tab-leads">Leads</button>
@@ -36,14 +36,18 @@
 
     <!-- Resumen / dashboard -->
     <section id="tab-resumen" class="section" role="tabpanel" aria-labelledby="tabbtn-resumen">
-      <div id="dash"><div class="sk-row" style="height:96px;margin-bottom:14px"></div></div>
+      <div id="dash"><div class="sk-row sk-row-dash"></div></div>
     </section>
 
     <!-- Leads -->
-    <section id="tab-leads" class="section" role="tabpanel" aria-labelledby="tabbtn-leads" style="display:none">
+    <section id="tab-leads" class="section hidden" role="tabpanel" aria-labelledby="tabbtn-leads">
       <div class="toolbar">
+        <div class="tb-search">
+          <label for="filter-q">Buscar</label>
+          <input id="filter-q" type="search" placeholder="Nombre, email o teléfono…" autocomplete="off" aria-label="Buscar leads por nombre, email o teléfono" />
+        </div>
         <div>
-          <label>Proyecto</label>
+          <label for="filter-project">Proyecto</label>
           <select id="filter-project">
             <option value="">Todos</option>
             <option value="agencia">Agencia</option>
@@ -52,7 +56,7 @@
           </select>
         </div>
         <div>
-          <label>Estado</label>
+          <label for="filter-status">Estado</label>
           <select id="filter-status">
             <option value="">Todos</option>
             <option value="new">Nuevo</option>
@@ -61,16 +65,26 @@
             <option value="lost">Perdido</option>
           </select>
         </div>
-        <button class="btn-ghost" id="reload">↻ Actualizar</button>
+        <div>
+          <label for="filter-sort">Orden</label>
+          <select id="filter-sort">
+            <option value="recent">Recientes primero</option>
+            <option value="oldest">Antiguos primero</option>
+          </select>
+        </div>
+        <div class="tb-actions">
+          <button class="btn-ghost" id="reload">↻ Actualizar</button>
+          <button class="btn-ghost" id="export-csv">↓ Exportar CSV</button>
+        </div>
       </div>
       <div class="card"><div id="leads-content"></div></div>
     </section>
 
     <!-- Anuncios -->
-    <section id="tab-ads" class="section" role="tabpanel" aria-labelledby="tabbtn-ads" style="display:none">
+    <section id="tab-ads" class="section hidden" role="tabpanel" aria-labelledby="tabbtn-ads">
       <div class="card">
         <div class="field">
-          <label>Proyecto</label>
+          <label for="ad-project">Proyecto</label>
           <select id="ad-project">
             <option value="agencia">Agencia — Gonzalo Ferraro Automóviles</option>
             <option value="mesa">Mesa — Helpdesk</option>
@@ -78,11 +92,11 @@
           </select>
         </div>
         <div class="field">
-          <label>¿Qué querés promocionar? (brief)</label>
+          <label for="ad-brief">¿Qué querés promocionar? (brief)</label>
           <textarea id="ad-brief" maxlength="1000" placeholder="Ej: Financiación 0% en autos 0km para este mes"></textarea>
         </div>
         <div class="field">
-          <label>Plataforma</label>
+          <label for="ad-channel">Plataforma</label>
           <select id="ad-channel">
             <option value="ambos">Facebook + Instagram</option>
             <option value="facebook">Facebook</option>
@@ -96,7 +110,7 @@
     </section>
   </main>
 
-  <div id="toast-wrap"></div>
+  <div id="toast-wrap" role="status" aria-live="polite" aria-atomic="false"></div>
   <script src="/admin/app.js"></script>
 </body>
 </html>

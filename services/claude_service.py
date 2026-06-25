@@ -33,12 +33,16 @@ PREGUNTAS CLAVE (hacelas de a una, en el momento natural de la conversación):
 """
 
 
-async def get_ai_response(project: str, project_config: dict, message: str, history: list) -> str:
-    system_prompt = SYSTEM_TEMPLATE.format(
+def _build_system_prompt(project_config: dict) -> str:
+    return SYSTEM_TEMPLATE.format(
         persona=project_config["persona"],
         goal=project_config["goal"],
         questions="\n".join(f"- {q}" for q in project_config["questions"]),
     )
+
+
+async def get_ai_response(project: str, project_config: dict, message: str, history: list) -> str:
+    system_prompt = _build_system_prompt(project_config)
 
     messages = history[-20:] + [{"role": "user", "content": message}]
 
@@ -56,3 +60,28 @@ async def get_ai_response(project: str, project_config: dict, message: str, hist
     # Acceso defensivo: tomar el primer bloque de texto, no asumir content[0].
     text = next((b.text for b in response.content if getattr(b, "type", None) == "text"), "")
     return text or FALLBACK
+
+
+async def stream_ai_response(project: str, project_config: dict, message: str, history: list):
+    """Versión streaming de get_ai_response: async generator que yieldea cada delta de texto.
+
+    Reusa el mismo system prompt y armado de `messages` que get_ai_response. Ante un error
+    de la API de Claude yieldea el FALLBACK una sola vez (no propaga), para que el consumidor
+    cierre el stream limpio. NO reemplaza a get_ai_response (que sigue para el webhook y el
+    fallback no-streaming de /chat)."""
+    system_prompt = _build_system_prompt(project_config)
+
+    messages = history[-20:] + [{"role": "user", "content": message}]
+
+    try:
+        async with client.messages.stream(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            system=system_prompt,
+            messages=messages,
+        ) as stream:
+            async for delta in stream.text_stream:
+                yield delta
+    except anthropic.APIError:
+        logger.exception("Error en el streaming de la API de Claude")
+        yield FALLBACK

@@ -12,6 +12,54 @@ y el proyecto adhiere (con criterio flexible) a [Versionado Semántico](https://
 
 - Nada por ahora.
 
+## [0.5.0] — Auditoría profunda + features de captación (sin publicar)
+
+Pasada multi-agente sobre el código ya maduro: bugs reales encontrados por tests
+adversariales, hardening adicional, features para el panel y mucha más cobertura.
+
+### Fixed
+
+- **Echo de Instagram**: Meta reenvía nuestros propios mensajes salientes como
+  evento; sin filtrar `is_echo` el bot se contestaba a sí mismo en loop. Se descartan.
+- **Reclamo de evento prematuro**: el webhook reclamaba el id del evento ANTES de
+  validar `from` (WhatsApp) / `sender` (Instagram); si faltaban, un reintento válido
+  de Meta quedaba descartado. Ahora se valida primero y recién se reclama.
+- Purga lazy de `processed_events`: la tarea fire-and-forget reusaba la sesión del
+  request (posible use-after-close); ahora abre la suya. `get_running_loop` en vez del
+  deprecado `get_event_loop`.
+
+### Security
+
+- Rate-limit no spoofeable: la clave usa el ÚLTIMO `X-Forwarded-For` (el del proxy de
+  confianza), no el primero (controlable por el cliente) → no se evade el límite de `/chat`.
+- CSP del panel `/admin` endurecida a `style-src 'self'` (sin `'unsafe-inline'`): se
+  eliminaron todos los estilos inline (a clases CSS).
+- CSV export con protección anti CSV-injection.
+
+### Added
+
+- Export de leads a CSV (`GET /leads/export.csv`) + botón en el panel.
+- Búsqueda (`q`) y orden (`sort`) en el listado de leads, con UI (debounce).
+- Transcript de la conversación de cada lead (`GET /leads/{id}/messages`) + vista
+  expandible en el panel.
+- Notificación al equipo cuando entra un lead caliente (log + `NOTIFY_WEBHOOK_URL`).
+- `GET /health/ready`: readiness que verifica la DB (503 si Postgres cae); `/health`
+  queda como liveness.
+- Tasa de conversión y promedio de mensajes en `/leads/stats`.
+- Accesibilidad del panel: live region en toasts, manejo de foco, navegación por
+  flechas en las tabs (roving tabindex), affordance de notas. Widget: scroll trapping,
+  linkify seguro de los mensajes del bot.
+
+### Performance
+
+- Índice en `processed_events.created_at` (la purga filtra por ahí) y pool de
+  conexiones dimensionado para ráfagas.
+
+### Tests
+
+- +~110 tests: bugs del webhook, rate-limit, export, transcript, notificación,
+  readiness, retry de Meta, fallback de Claude y parsing de anuncios.
+
 ## [0.4.0] — Endurecimiento pre-prod (sin publicar)
 
 Pasada de seguridad, robustez y UX dejando el servicio listo para deployar.

@@ -7,7 +7,7 @@ import io
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
@@ -21,6 +21,8 @@ router = APIRouter()
 def list_leads(
     project: str | None = None,
     status: str | None = None,
+    q: str | None = None,
+    sort: str = Query("recent", pattern="^(recent|oldest)$"),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -30,8 +32,37 @@ def list_leads(
         query = query.filter_by(project=project)
     if status:
         query = query.filter_by(status=status)
-    leads = query.order_by(Lead.created_at.desc()).limit(limit).offset(offset).all()
+    if q:
+        like = f"%{q.strip()}%"
+        query = query.filter(or_(
+            Lead.name.ilike(like), Lead.email.ilike(like),
+            Lead.phone.ilike(like), Lead.instagram.ilike(like),
+        ))
+    order = Lead.created_at.asc() if sort == "oldest" else Lead.created_at.desc()
+    leads = query.order_by(order).limit(limit).offset(offset).all()
     return [_serialize(l) for l in leads]
+
+
+@router.get("/{lead_id}/messages")
+def lead_messages(lead_id: UUID, db: Session = Depends(get_db)):
+    """Transcript de la conversación asociada a un lead (para verlo en el panel)."""
+    lead = db.query(Lead).filter_by(id=lead_id).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead no encontrado")
+    conv = lead.conversation
+    if not conv:
+        return {"channel": None, "messages": []}
+    return {
+        "channel": conv.channel,
+        "messages": [
+            {
+                "role": m.role,
+                "content": m.content,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            for m in conv.messages
+        ],
+    }
 
 
 def _csv_safe(val) -> str:

@@ -2,16 +2,17 @@ import logging
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from sqlalchemy import text
 
 from auth import require_admin
 from config import get_settings
-from database import create_tables
+from database import create_tables, engine
 from ratelimit import limiter
 from services import meta_service
 from routers.ads import router as ads_router
@@ -103,7 +104,20 @@ app.mount("/admin", StaticFiles(directory="admin", html=True), name="admin")
 
 @app.get("/health")
 def health():
+    """Liveness: el proceso responde. Lo usa el healthcheck de Railway."""
     return {"status": "ok"}
+
+
+@app.get("/health/ready")
+def ready():
+    """Readiness: además verifica que la DB responda (no apto para liveness:
+    devuelve 503 si Postgres está caído)."""
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception:
+        raise HTTPException(status_code=503, detail="DB no disponible")
+    return {"status": "ready"}
 
 
 if __name__ == "__main__":

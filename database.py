@@ -10,7 +10,12 @@ settings = get_settings()
 _db_url = settings.database_url.replace("postgres://", "postgresql://", 1)
 # pool_pre_ping: valida la conexión antes de usarla (Railway cierra conexiones idle).
 # pool_recycle: recicla conexiones más viejas que 30 min antes de que el server las corte.
-engine = create_engine(_db_url, pool_pre_ping=True, pool_recycle=1800)
+_engine_kwargs = {"pool_pre_ping": True, "pool_recycle": 1800}
+# Dimensionar el pool para ráfagas (webhooks concurrentes + panel). SQLite usa otro
+# pool que no acepta estos kwargs, así que solo se aplican en Postgres.
+if not _db_url.startswith("sqlite"):
+    _engine_kwargs.update(pool_size=10, max_overflow=20, pool_timeout=30)
+engine = create_engine(_db_url, **_engine_kwargs)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
@@ -42,6 +47,7 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS ix_leads_created_at ON leads (created_at)",
     "CREATE INDEX IF NOT EXISTS ix_conversations_project ON conversations (project)",
     "CREATE INDEX IF NOT EXISTS ix_conversations_status ON conversations (status)",
+    "CREATE INDEX IF NOT EXISTS ix_processed_events_created_at ON processed_events (created_at)",
 ]
 
 

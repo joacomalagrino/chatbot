@@ -138,9 +138,13 @@ def purge_old_events(db: Session, days: int = EVENT_TTL_DAYS) -> int:
     return n
 
 
-async def _maybe_purge_events(db: Session) -> None:
+async def _maybe_purge_events() -> None:
     """Dispara la purga a lo sumo 1x/hora por worker (throttle en memoria) para no correr el
     DELETE en cada webhook. Idempotente entre workers (cada uno purga lo que ya purgó otro).
+
+    Abre su PROPIA sesión: NO hereda la del request, que es fire-and-forget y podría
+    ya estar cerrada cuando esta tarea corre (use-after-close), o estar siendo usada por
+    otra query (la Session de SQLAlchemy no es segura para uso concurrente).
 
     El chequeo-y-actualización de _last_purge está protegido por _purge_lock para que
     dos BackgroundTasks concurrentes no lancen la purga al mismo tiempo."""
@@ -155,11 +159,14 @@ async def _maybe_purge_events(db: Session) -> None:
         if time.monotonic() - _last_purge < _PURGE_INTERVAL_S:
             return
         _last_purge = time.monotonic()
+    db = SessionLocal()
     try:
         purge_old_events(db)
     except Exception:
         db.rollback()
         logger.exception("No se pudo purgar processed_events")
+    finally:
+        db.close()
 
 
 def _claim_event(db: Session, event_id: str) -> bool:
@@ -172,13 +179,12 @@ def _claim_event(db: Session, event_id: str) -> bool:
     try:
         db.commit()
         # Purga lazy: la lanzamos como tarea fire-and-forget si hay un event loop
-        # activo (i.e. cuando se llama desde dentro de _process_event). Si no hay
-        # loop (tests síncronos directos) simplemente se omite — la purga es
-        # best-effort y no afecta la idempotencia.
+        # corriendo (i.e. cuando se llama desde dentro de _process_event). Si no hay
+        # loop (tests síncronos directos) get_running_loop lanza RuntimeError y se
+        # omite — la purga es best-effort y no afecta la idempotencia. La tarea abre
+        # su propia sesión (no le pasamos `db`, que es del request).
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(_maybe_purge_events(db))
+            asyncio.get_running_loop().create_task(_maybe_purge_events())
         except RuntimeError:
             pass
         return True

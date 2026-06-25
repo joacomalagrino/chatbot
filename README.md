@@ -87,11 +87,37 @@ Cubren la lógica pura de texto (`tests/test_text_utils.py`) y la integración d
 con stubs de Claude y Meta sobre SQLite (`tests/test_app_integration.py`): firma del
 webhook, idempotencia, creación de conversación/mensaje/lead y la API de leads.
 
+## Migraciones (Alembic)
+
+El schema se maneja con **Alembic** (`migrations/`). En el arranque, `database.init_db()`
+aplica las migraciones automáticamente:
+
+- **DB fresca** (dev/tests/entorno nuevo): corre todas las migraciones desde cero.
+- **DB de prod creada por `create_all`** antes de Alembic (tiene tablas pero no
+  `alembic_version`): se **adopta** con `stamp` al baseline `0001_baseline` —sin recrear
+  ni tocar datos— y luego aplica lo que hubiera pendiente.
+- **DB ya bajo Alembic**: solo aplica lo pendiente (no-op si está al día).
+
+Si el tooling de Alembic falla, cae a `create_all` para que la app igual arranque.
+
+Crear una migración nueva tras cambiar un modelo (`models.py`):
+
+```bash
+# La URL la toma de DATABASE_URL (config.py). En local podés apuntar a una sqlite.
+DATABASE_URL="sqlite:///./dev.db" alembic revision --autogenerate -m "descripcion del cambio"
+# revisar el archivo generado en migrations/versions/ y luego:
+DATABASE_URL="sqlite:///./dev.db" alembic upgrade head
+```
+
+El test `tests/test_migrations.py::test_no_drift_baseline_matches_models` falla si se
+cambia un modelo sin generar la migración correspondiente.
+
 ## Deploy (Railway)
 
 `railway.toml` define el build con NIXPACKS y arranca con
 `uvicorn main:app --host 0.0.0.0 --port $PORT`, con health check en `/health`.
-Las variables de entorno se cargan desde el panel de Railway.
+Las variables de entorno se cargan desde el panel de Railway. Las migraciones corren
+solas en el arranque (`init_db`), no hace falta un paso de release aparte.
 
 ## Notas de seguridad
 

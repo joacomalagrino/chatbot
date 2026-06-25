@@ -12,7 +12,7 @@ from sqlalchemy import text
 
 from auth import require_admin
 from config import get_settings
-from database import create_tables, engine
+from database import engine, init_db
 from ratelimit import limiter
 from services import meta_service
 from routers.ads import router as ads_router
@@ -27,7 +27,7 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
-        create_tables()
+        init_db()
     except Exception:
         logger.exception("DB init failed (app still starts)")
     yield

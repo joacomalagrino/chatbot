@@ -1,6 +1,7 @@
 import logging
+import os
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from config import get_settings
 
@@ -58,3 +59,49 @@ def _ensure_indexes():
                 conn.execute(text(stmt))
     except Exception:
         logger.exception("No se pudieron crear los índices (no es fatal)")
+
+
+# --- Migraciones (Alembic) --------------------------------------------------
+# El schema lo maneja Alembic (migrations/). create_tables() queda como fallback
+# para que la app SIEMPRE arranque aunque el tooling de Alembic falle.
+
+_MIGRATIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "migrations")
+BASELINE_REVISION = "0001_baseline"
+
+
+def _alembic_config():
+    """Config de Alembic armada en código (sin .ini) con script_location ABSOLUTO,
+    para funcionar sin importar el CWD (Railway corre desde /app; los tests desde la
+    raíz del repo). Al no setear config_file_name, env.py no toca el logging del host."""
+    from alembic.config import Config
+
+    cfg = Config()
+    cfg.set_main_option("script_location", _MIGRATIONS_DIR)
+    return cfg
+
+
+def init_db():
+    """Inicializa/migra el schema en el arranque.
+
+    - DB fresca (tests/dev/entorno nuevo): aplica todas las migraciones desde cero.
+    - DB de prod creada por create_all ANTES de Alembic (tiene tablas pero no
+      `alembic_version`): la ADOPTA con `stamp` al baseline —sin recrear ni tocar
+      datos— y luego aplica las migraciones posteriores que hubiera.
+    - DB ya bajo Alembic: solo aplica lo pendiente (no-op si está en head).
+
+    Si Alembic falla por cualquier motivo (tooling, path, import), cae a create_all:
+    la app arranca igual, con el mismo comportamiento que antes de introducir Alembic."""
+    try:
+        from alembic import command
+
+        tables = set(inspect(engine).get_table_names())
+        cfg = _alembic_config()
+        if "alembic_version" not in tables and "conversations" in tables:
+            # DB preexistente sin control de versiones (la de prod): adoptarla.
+            logger.info("DB preexistente detectada; stamp a %s (sin recrear)", BASELINE_REVISION)
+            command.stamp(cfg, BASELINE_REVISION)
+        command.upgrade(cfg, "head")
+        _ensure_indexes()  # backstop idempotente (prod ya los tiene)
+    except Exception:
+        logger.exception("Alembic falló en el arranque; fallback a create_all")
+        create_tables()

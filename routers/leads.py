@@ -2,7 +2,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 from uuid import UUID
 
+import csv
+import io
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -28,6 +32,47 @@ def list_leads(
         query = query.filter_by(status=status)
     leads = query.order_by(Lead.created_at.desc()).limit(limit).offset(offset).all()
     return [_serialize(l) for l in leads]
+
+
+def _csv_safe(val) -> str:
+    """Anti CSV-injection: si la celda empieza con un caracter de fórmula, la prefija
+    con comilla simple para que Excel/Sheets no la interpreten como fórmula."""
+    s = "" if val is None else str(val)
+    if s[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        s = "'" + s
+    return s
+
+
+@router.get("/export.csv")
+def export_leads(
+    project: str | None = None,
+    status: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """Exporta los leads (mismos filtros que el listado) a CSV descargable."""
+    query = db.query(Lead)
+    if project:
+        query = query.filter_by(project=project)
+    if status:
+        query = query.filter_by(status=status)
+    leads = query.order_by(Lead.created_at.desc()).all()
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["fecha", "proyecto", "nombre", "telefono", "email",
+                "instagram", "estado", "intereses", "notas"])
+    for l in leads:
+        w.writerow([_csv_safe(x) for x in (
+            l.created_at.isoformat() if l.created_at else "",
+            l.project, l.name, l.phone, l.email, l.instagram, l.status,
+            "; ".join(_interests_list(l.interests)),
+            (l.notes or "").replace("\n", " "),
+        )])
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=leads.csv"},
+    )
 
 
 @router.get("/stats")

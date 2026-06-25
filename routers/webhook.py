@@ -224,14 +224,20 @@ async def _deliver(send_coro, channel: str, conversation_id) -> bool:
 
 async def _handle_ig_event(db: Session, event: dict):
     msg = event.get("message", {})
+    # Echo: Meta reenvía NUESTROS propios mensajes salientes como evento. Si no se
+    # filtran, el bot se contestaría a sí mismo en loop. Descartar antes de todo.
+    if msg.get("is_echo"):
+        return
     text = msg.get("text")
     if not text:
         return
-    mid = msg.get("mid")
-    if not _claim_event(db, f"ig_{mid}" if mid else ""):
-        return
     ig_id = event.get("sender", {}).get("id")
     if not ig_id:
+        return
+    # Reclamar el evento DESPUÉS de validar que es procesable: si lo reclamáramos antes
+    # y faltara el sender, un reintento válido de Meta quedaría descartado.
+    mid = msg.get("mid")
+    if not _claim_event(db, f"ig_{mid}" if mid else ""):
         return
     project = _resolve_project("", {}, DEFAULT_INSTAGRAM_PROJECT)
     conversation = get_or_create_conversation(
@@ -252,11 +258,13 @@ async def _handle_change(db: Session, change: dict):
             text = (msg.get("text") or {}).get("body")
             if not text:
                 continue
-            wamid = msg.get("id")
-            if not _claim_event(db, f"wa_{wamid}" if wamid else ""):
-                continue
             phone = msg.get("from")
             if not phone:
+                continue
+            # Reclamar DESPUÉS de validar 'from': si reclamáramos antes y faltara,
+            # un reintento válido de Meta (mismo wamid) quedaría descartado.
+            wamid = msg.get("id")
+            if not _claim_event(db, f"wa_{wamid}" if wamid else ""):
                 continue
             project = _resolve_project(phone, settings.wa_number_map(), DEFAULT_WHATSAPP_PROJECT)
             conversation = get_or_create_conversation(

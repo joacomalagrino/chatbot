@@ -450,6 +450,103 @@
     messageCount++;
     showTyping();
 
+    // Intentamos PRIMERO el streaming SSE (velocidad percibida). Si la conexión NO llegó a
+    // establecerse (fetch rechazado, status no-200 o sin body), caemos al POST /chat/
+    // no-streaming (fallback) — ahí el server no persistió nada, reintentar es seguro.
+    // Si la respuesta 200 ya empezó (`state.started`), el turno del usuario YA se está
+    // persistiendo en el server, así que un fallo posterior NO reintenta por /chat/
+    // (duplicaría el mensaje): mostramos el error con opción de Reintentar.
+    var streamState = { started: false };
+    streamMessage(text, lastText, streamState).catch(function () {
+      if (streamState.started) {
+        removeTyping();
+        addMessage('bot', 'Se cortó la conexión. Intentá de nuevo en un momento.');
+        showRetry(lastText);
+        sending = false;
+      } else {
+        sendMessageFallback(text, lastText);
+      }
+    });
+  }
+
+  // Streaming SSE: lee response.body con un reader, parsea los frames `data: ...\n\n` y
+  // hace crecer la burbuja del bot delta a delta. Resuelve cuando llega `done`. Lanza
+  // (reject) si el stream no es usable o el server emite `error`, para caer al fallback.
+  function streamMessage(text, lastText, state) {
+    return fetch(API_URL + '/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: SESSION_ID, project: PROJECT, message: text, channel: 'web' }),
+    }).then(function (r) {
+      if (!r.ok || !r.body || !window.TextDecoder) throw new Error('stream no disponible');
+      // El POST llegó al server (200 + body): el turno del usuario YA se está persistiendo,
+      // así que a partir de acá un fallo NO debe reintentar por /chat/ (evita duplicar).
+      state.started = true;
+
+      var reader = r.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer = '';
+      var acc = '';
+      var bubble = null;        // burbuja del bot que va creciendo (se crea al 1er delta)
+      var suggest = false;
+      var gotDone = false;
+
+      function ensureBubble() {
+        if (bubble) return;
+        removeTyping();
+        var messages = document.getElementById('cb-messages');
+        bubble = document.createElement('div');
+        bubble.className = 'cb-msg bot';
+        messages.appendChild(bubble);
+      }
+
+      function handleFrame(jsonStr) {
+        var data;
+        try { data = JSON.parse(jsonStr); } catch (e) { return; }
+        if (data.error) throw new Error('stream error');
+        if (data.delta != null) {
+          ensureBubble();
+          acc += data.delta;
+          // Mientras llega, mostramos texto plano creciendo (sin linkify, que se aplica al final).
+          bubble.textContent = acc;
+          scrollToBottom(document.getElementById('cb-messages'));
+        } else if (data.done) {
+          gotDone = true;
+          suggest = !!data.suggest_channels;
+        }
+      }
+
+      function pump() {
+        return reader.read().then(function (res) {
+          if (res.value) buffer += decoder.decode(res.value, { stream: true });
+          // Procesar los frames completos (separados por línea en blanco).
+          var idx;
+          while ((idx = buffer.indexOf('\n\n')) !== -1) {
+            var raw = buffer.slice(0, idx);
+            buffer = buffer.slice(idx + 2);
+            var line = raw.replace(/^data:\s?/, '');
+            if (line) handleFrame(line);
+          }
+          if (res.done) {
+            // Si no llegó ni un delta ni el done, el stream no sirvió → fallback.
+            if (!gotDone && acc === '') throw new Error('stream vacío');
+            // Al final aplicamos el linkify seguro sobre el texto completo (igual que addMessage).
+            if (bubble) bubble.innerHTML = linkify(acc);
+            else { removeTyping(); addMessage('bot', acc || 'Lo siento, hubo un error. Intentá de nuevo.'); }
+            if (suggest) showChannelSuggestions();
+            sending = false;
+            return;
+          }
+          return pump();
+        });
+      }
+
+      return pump();
+    });
+  }
+
+  // Fallback no-streaming: el flujo original con POST /chat/.
+  function sendMessageFallback(text, lastText) {
     fetch(API_URL + '/chat/', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

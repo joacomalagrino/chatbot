@@ -65,10 +65,11 @@ _SECURITY_HEADERS = {
 }
 
 
-# CSP del panel admin: scripts solo desde el propio origen (sin inline -> bloquea XSS),
-# estilos inline permitidos (usa style="" para anchos/visibilidad), nada de framing.
+# CSP del panel admin: scripts y estilos SOLO del propio origen (sin inline -> bloquea
+# XSS), nada de framing. Los anchos dinámicos del dashboard se setean por CSSOM
+# (element.style.width), que la CSP no bloquea; no quedan atributos style="" inline.
 _ADMIN_CSP = (
-    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+    "default-src 'self'; script-src 'self'; style-src 'self'; "
     "img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'"
 )
 

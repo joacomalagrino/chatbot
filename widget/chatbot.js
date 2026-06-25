@@ -105,11 +105,17 @@
       width: 36px; height: 36px; border-radius: 50%;
       background: rgba(255,255,255,.25);
       display: flex; align-items: center; justify-content: center; font-size: 18px;
+      flex-shrink: 0; line-height: 1;
     }
-    #cb-header .cb-title { font-weight: 600; font-size: 15px; }
-    #cb-header .cb-subtitle { font-size: 12px; opacity: .85; }
+    /* Bloque de texto: 2 líneas que se centran como unidad contra el avatar.
+       min-width:0 evita que un título largo desborde y descuadre el header. */
+    #cb-header .cb-titles { display: flex; flex-direction: column; justify-content: center; min-width: 0; }
+    #cb-header .cb-title { font-weight: 600; font-size: 15px; line-height: 1.25;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #cb-header .cb-subtitle { font-size: 12px; opacity: .85; line-height: 1.3;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     #cb-close {
-      margin-left: auto; background: none; border: none;
+      margin-left: auto; flex-shrink: 0; background: none; border: none;
       color: #fff; cursor: pointer; font-size: 20px; line-height: 1; padding: 6px; border-radius: 6px;
     }
     #cb-close:hover { background: rgba(255,255,255,.15); }
@@ -118,6 +124,8 @@
     #cb-messages {
       flex: 1; overflow-y: auto; padding: 16px;
       display: flex; flex-direction: column; gap: 10px;
+      /* El scroll del chat no se filtra a la página de fondo (scroll trapping). */
+      overscroll-behavior: contain;
     }
     .cb-msg {
       max-width: 82%; padding: 10px 14px;
@@ -127,6 +135,8 @@
     }
     .cb-msg.bot { background: var(--cb-surface); color: var(--cb-text); border-bottom-left-radius: 4px; align-self: flex-start; transform-origin: left bottom; }
     .cb-msg.user { background: var(--cb-accent); color: #fff; border-bottom-right-radius: 4px; align-self: flex-end; transform-origin: right bottom; }
+    .cb-msg.bot a { color: var(--cb-accent); text-decoration: underline; text-underline-offset: 2px; word-break: break-all; }
+    .cb-msg.bot a:hover { text-decoration-thickness: 2px; }
     @keyframes cb-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
     #cb-quick { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 16px 12px; }
@@ -214,6 +224,27 @@
     });
   }
 
+  // Convierte URLs http(s) en enlaces clicables. SEGURIDAD: se escapa TODO el texto
+  // primero (anti-XSS) y recién después se buscan URLs sobre el texto ya escapado; el
+  // href usa esa misma forma escapada (el navegador decodifica &amp;->& al navegar).
+  // Solo http/https (nunca javascript:). Se recorta puntuación de cierre pegada al final.
+  var URL_RE = /\bhttps?:\/\/[^\s<]+/g;
+  function linkify(text) {
+    var safe = esc(text);
+    return safe.replace(URL_RE, function (match) {
+      // Sacamos puntuación final que no suele ser parte de la URL ni paréntesis sueltos.
+      // Como el texto ya está escapado, recortamos también entidades de cierre (&gt; &quot; &#39;).
+      var trail = '';
+      var m;
+      while ((m = match.match(/(&gt;|&quot;|&#39;|[.,;:!?)\]]+)$/))) {
+        trail = m[0] + trail;
+        match = match.slice(0, match.length - m[0].length);
+      }
+      if (!match) return trail;
+      return '<a href="' + match + '" target="_blank" rel="noopener noreferrer">' + match + '</a>' + trail;
+    });
+  }
+
   function buildWidget() {
     var root = document.createElement('div');
     root.className = 'cb-root';
@@ -240,7 +271,7 @@
     panelEl.innerHTML = `
       <div id="cb-header">
         <div class="cb-avatar" aria-hidden="true">${esc(HEADER.avatar)}</div>
-        <div>
+        <div class="cb-titles">
           <div class="cb-title">${esc(HEADER.title)}</div>
           <div class="cb-subtitle">${esc(HEADER.subtitle)}</div>
         </div>
@@ -358,7 +389,14 @@
     var messages = document.getElementById('cb-messages');
     var div = document.createElement('div');
     div.className = 'cb-msg ' + role;
-    div.textContent = text;
+    if (role === 'bot') {
+      // Bot: respetamos saltos de línea (white-space: pre-wrap) y hacemos las URLs
+      // clicables. El texto se escapa dentro de linkify ANTES de tocar innerHTML (anti-XSS).
+      div.innerHTML = linkify(text);
+    } else {
+      // Usuario: texto plano, sin linkificar (textContent es inherentemente seguro).
+      div.textContent = text;
+    }
     messages.appendChild(div);
     scrollToBottom(messages);
   }

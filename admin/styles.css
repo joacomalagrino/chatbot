@@ -23,11 +23,15 @@
     --bg: #15171c; --card: #1f2228; --text: #e8eaed; --muted: #9aa0a6; --border: #2d3139;
     --shadow: 0 1px 3px rgba(0,0,0,.4);
     --st-new-bg: #1a2740; --st-contacted-bg: #3a2c10; --st-qualified-bg: #14301f; --st-lost-bg: #2a2e36;
+    --search-cancel-filter: invert(.7);
   }
 }
 * { box-sizing: border-box; }
 body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   background: var(--bg); color: var(--text); line-height: 1.5; }
+
+/* Utilidad de visibilidad: reemplaza los display:none inline (CSP estricta sin 'unsafe-inline'). */
+.hidden { display: none !important; }
 
 header { background: var(--card); border-bottom: 1px solid var(--border);
   padding: 14px 24px; display: flex; align-items: center; gap: 12px; position: sticky; top: 0; z-index: 10; }
@@ -55,6 +59,17 @@ main { max-width: 1100px; margin: 0 auto; padding: 24px; }
 .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
   box-shadow: var(--shadow); padding: 20px; }
 .toolbar { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 16px; }
+/* La búsqueda crece para llenar el espacio; las acciones se empujan al borde derecho. */
+.toolbar .tb-search { flex: 1 1 220px; min-width: 180px; }
+.toolbar .tb-search input { width: 100%; }
+.toolbar .tb-actions { margin-left: auto; display: flex; gap: 8px; }
+/* En pantallas chicas las acciones bajan a su propia fila a ancho completo. */
+@media (max-width: 560px) {
+  .toolbar .tb-actions { margin-left: 0; flex-basis: 100%; }
+  .toolbar .tb-actions .btn-ghost { flex: 1; }
+}
+/* La X nativa de input[type=search] hereda el color del texto en dark mode. */
+input[type="search"]::-webkit-search-cancel-button { filter: var(--search-cancel-filter, none); }
 select, input, textarea { font: inherit; padding: 8px 12px; border-radius: 8px;
   border: 1px solid var(--border); background: var(--card); color: var(--text); outline: none; }
 select:focus, input:focus, textarea:focus { border-color: var(--accent); }
@@ -113,6 +128,38 @@ tr:last-child td { border-bottom: none; }
 .notes-row td { background: var(--bg); font-size: 13px; color: var(--text); padding: 12px 16px; }
 .notes-row .nlabel { font-size: 11px; color: var(--muted); text-transform: uppercase; font-weight: 600; margin-bottom: 4px; }
 
+/* Affordance de expansión: chevron que rota cuando la fila está abierta.
+   Da una pista visual de que la fila esconde notas (antes no había ninguna). */
+.expander { display: inline-flex; align-items: center; gap: 6px; }
+.expander .chev { display: inline-block; width: 14px; color: var(--muted); flex-shrink: 0;
+  transition: transform .15s ease; user-select: none; }
+.lead-row.is-open .expander .chev { transform: rotate(90deg); color: var(--accent); }
+.lead-row.is-open .name { color: var(--accent); }
+
+/* ── Transcript (conversación del lead) ── */
+.lead-actions { display: flex; gap: 8px; align-items: center; }
+.btn-mini { background: transparent; color: var(--muted); border: 1px solid var(--border);
+  border-radius: 7px; padding: 5px 10px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.btn-mini:hover { background: var(--bg); color: var(--accent); border-color: var(--accent); }
+.btn-mini[aria-expanded="true"] { color: var(--accent); border-color: var(--accent); }
+.transcript-row td { background: var(--bg); padding: 16px; }
+.transcript {
+  display: flex; flex-direction: column; gap: 8px;
+  max-height: 360px; overflow-y: auto; overscroll-behavior: contain;
+  padding: 2px; max-width: 640px;
+}
+.tr-head { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em;
+  font-weight: 600; margin-bottom: 4px; }
+.tr-bubble { max-width: 80%; padding: 9px 13px; border-radius: 14px; font-size: 13px; line-height: 1.45;
+  white-space: pre-wrap; word-break: break-word; box-shadow: var(--shadow); }
+.tr-bubble.assistant { background: var(--card); border: 1px solid var(--border); color: var(--text);
+  align-self: flex-start; border-bottom-left-radius: 4px; }
+.tr-bubble.user { background: var(--accent); color: #fff; align-self: flex-end; border-bottom-right-radius: 4px; }
+.tr-time { font-size: 10px; opacity: .7; display: block; margin-top: 3px; }
+.tr-loading { color: var(--muted); font-size: 13px; padding: 8px 2px; }
+/* El spinner por defecto es blanco (para botones). En la fila de transcript va sobre fondo claro. */
+.tr-loading .spinner, .btn-ghost .spinner { border-color: var(--border); border-top-color: var(--accent); }
+
 .chip { display: inline-block; padding: 3px 11px; border-radius: 20px; font-size: 12px; font-weight: 600; white-space: nowrap; }
 .chip.new { background: var(--st-new-bg); color: var(--st-new); }
 .chip.warm, .chip.contacted { background: var(--st-contacted-bg); color: var(--st-contacted); }
@@ -121,6 +168,8 @@ tr:last-child td { border-bottom: none; }
 select.status-sel { padding: 5px 8px; font-size: 13px; }
 
 .muted { color: var(--muted); font-size: 13px; }
+.leads-count { margin-bottom: 10px; }
+.card.aud-card { margin-top: 16px; }
 .empty { text-align: center; padding: 48px 24px; color: var(--muted); }
 .empty .big { font-size: 32px; margin-bottom: 8px; }
 .error-box { text-align: center; padding: 40px 24px; color: var(--muted); }
@@ -130,6 +179,8 @@ select.status-sel { padding: 5px 8px; font-size: 13px; }
 .sk-row { height: 46px; border-radius: 8px; margin-bottom: 8px;
   background: linear-gradient(90deg, var(--bg) 25%, var(--border) 50%, var(--bg) 75%);
   background-size: 200% 100%; animation: sk 1.2s infinite; }
+.sk-row-dash { height: 96px; margin-bottom: 14px; }
+.sk-row-ad { height: 150px; }
 @keyframes sk { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 
 /* ── Gate ── */
@@ -174,4 +225,5 @@ select.status-sel { padding: 5px 8px; font-size: 13px; }
 
 @media (prefers-reduced-motion: reduce) {
   .sk-row, .spinner, .toast, #gate .card, .funnel-bar, .proj-row .pbar { animation: none !important; transition: none !important; }
+  .expander .chev { transition: none !important; }
 }

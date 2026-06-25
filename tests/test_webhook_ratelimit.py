@@ -1,5 +1,8 @@
-"""Rate-limit del POST /webhook/meta (120/min): un payload firmado capturado no se puede
-reproducir sin tope (acota la amplificación de fetches a Graph)."""
+"""El POST /webhook/meta NO se rate-limitea por IP: los webhooks de Meta llegan TODOS desde
+el pool compartido de Facebook (misma IP para todos los leads), así que un tope por IP sería
+un tope GLOBAL y dropearía leads legítimos en una ráfaga de campaña. La firma HMAC y la dedup
+por event_id ya cubren abuso/replay. Este test fija ese contrato: muchos requests válidos
+consecutivos NO deben dar 429."""
 import hashlib
 import hmac
 import json
@@ -31,8 +34,7 @@ def client(monkeypatch):
     monkeypatch.setattr(convsvc, "get_ai_response", fake_ai)
     monkeypatch.setattr(webhook, "send_whatsapp_message", fake_send)
     monkeypatch.setattr(webhook, "send_instagram_message", fake_send)
-    # Aislar el bucket en memoria: este test agota el límite a propósito y no debe
-    # filtrar el estado a otros tests (ni heredar el de ellos).
+    # Resetear el bucket en memoria por las dudas, para no heredar estado de otros tests.
     limiter.reset()
     with TestClient(main.app) as c:
         yield c
@@ -50,12 +52,12 @@ def _event(wamid):
     ]}}]}]}).encode()
 
 
-def test_webhook_rate_limit_429(client):
-    last = None
-    # 120/minute: el request 121 (con firma válida) debe ser rechazado por el limiter.
-    for i in range(121):
+def test_webhook_no_se_rate_limitea(client):
+    # 130 requests válidos consecutivos (misma IP, como vendrían del pool de Facebook):
+    # ninguno debe devolver 429. Si hubiera un tope por IP, los leads se perderían.
+    for i in range(130):
         body = _event(f"wamid.{i}")
-        last = client.post(
+        r = client.post(
             "/webhook/meta", content=body, headers={"X-Hub-Signature-256": _sign(body)}
         )
-    assert last.status_code == 429
+        assert r.status_code == 200, f"request {i} devolvió {r.status_code}"

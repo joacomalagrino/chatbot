@@ -5,12 +5,22 @@ Todos los cambios notables de este proyecto se documentan acá.
 El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y el proyecto adhiere (con criterio flexible) a [Versionado Semántico](https://semver.org/lang/es/).
 
-> Nota: el servicio todavía **no está deployado**, así que las versiones no tienen
-> fecha de publicación real. Se listan en orden cronológico de desarrollo.
+> Nota: el servicio está deployado en Railway (auto-deploy desde `origin/main`).
+> Las versiones se listan en orden cronológico de desarrollo.
 
 ## [Unreleased]
 
-- Nada por ahora.
+### Added
+
+- **Migraciones con Alembic.** El schema deja de depender de `create_all` y pasa a
+  manejarse con migraciones versionadas (`migrations/`, baseline `0001_baseline` que
+  reproduce exactamente el schema previo). En el arranque, `database.init_db()` hace
+  un **auto-bootstrap**: una DB fresca corre todas las migraciones; la DB de prod
+  (creada por `create_all` antes de Alembic) se **adopta** con `alembic stamp` al
+  baseline —sin recrear ni tocar datos— y de ahí en más aplica lo pendiente. Si el
+  tooling de Alembic falla, cae a `create_all` para que la app siempre arranque.
+  Cómo crear una migración nueva: ver README → "Migraciones". +4 tests (DB fresca,
+  adopción sin pérdida de datos, idempotencia, no-drift modelos vs migraciones).
 
 ## [0.5.0] — Auditoría profunda + features de captación (sin publicar)
 

@@ -5,7 +5,7 @@ from uuid import UUID
 import csv
 import io
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -13,12 +13,19 @@ from pydantic import BaseModel
 
 from database import get_db
 from models import Conversation, Lead, Message
+from ratelimit import limiter
 
 router = APIRouter()
 
+# Endpoints internos (protegidos por ADMIN_API_KEY): rate-limit por IP para acotar la
+# fuerza bruta del token desde el lado servidor.
+_ADMIN_RATE = "30/minute"
+
 
 @router.get("/")
+@limiter.limit(_ADMIN_RATE)
 def list_leads(
+    request: Request,
     project: str | None = None,
     status: str | None = None,
     q: str | None = None,
@@ -44,7 +51,8 @@ def list_leads(
 
 
 @router.get("/{lead_id}/messages")
-def lead_messages(lead_id: UUID, db: Session = Depends(get_db)):
+@limiter.limit(_ADMIN_RATE)
+def lead_messages(request: Request, lead_id: UUID, db: Session = Depends(get_db)):
     """Transcript de la conversación asociada a un lead (para verlo en el panel)."""
     lead = db.query(Lead).filter_by(id=lead_id).first()
     if not lead:
@@ -75,7 +83,9 @@ def _csv_safe(val) -> str:
 
 
 @router.get("/export.csv")
+@limiter.limit(_ADMIN_RATE)
 def export_leads(
+    request: Request,
     project: str | None = None,
     status: str | None = None,
     db: Session = Depends(get_db),
@@ -96,8 +106,10 @@ def export_leads(
         w.writerow([_csv_safe(x) for x in (
             l.created_at.isoformat() if l.created_at else "",
             l.project, l.name, l.phone, l.email, l.instagram, l.status,
-            "; ".join(_interests_list(l.interests)),
-            (l.notes or "").replace("\n", " "),
+            # interests viene de field_data del form de Meta (atacante-controlado): neutralizar
+            # \n/\r en cada elemento (igual que notes) para que no rompan filas del CSV.
+            "; ".join(i.replace("\n", " ").replace("\r", " ") for i in _interests_list(l.interests)),
+            (l.notes or "").replace("\n", " ").replace("\r", " "),
         )])
     return StreamingResponse(
         iter([buf.getvalue()]),
@@ -107,7 +119,8 @@ def export_leads(
 
 
 @router.get("/stats")
-def lead_stats(db: Session = Depends(get_db)):
+@limiter.limit(_ADMIN_RATE)
+def lead_stats(request: Request, db: Session = Depends(get_db)):
     """Métricas para el dashboard del panel: totales por estado, proyecto y canal."""
     by_status = dict(db.query(Lead.status, func.count(Lead.id)).group_by(Lead.status).all())
     by_project = dict(db.query(Lead.project, func.count(Lead.id)).group_by(Lead.project).all())
@@ -143,7 +156,8 @@ class StatusUpdate(BaseModel):
 
 
 @router.patch("/{lead_id}/status")
-def update_status(lead_id: UUID, body: StatusUpdate, db: Session = Depends(get_db)):
+@limiter.limit(_ADMIN_RATE)
+def update_status(request: Request, lead_id: UUID, body: StatusUpdate, db: Session = Depends(get_db)):
     # lead_id: UUID -> FastAPI valida el formato y pasa un objeto UUID al query
     # (la columna es Uuid; pasarle un str crudo rompería con StatementError).
     lead = db.query(Lead).filter_by(id=lead_id).first()

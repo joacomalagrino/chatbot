@@ -63,3 +63,31 @@ def test_csv_safe_neutraliza_formulas():
     assert _csv_safe("@cmd").startswith("'")
     assert _csv_safe("normal") == "normal"
     assert _csv_safe(None) == ""
+
+
+def test_export_neutraliza_saltos_en_interests(client):
+    # interests viene de field_data del form de Meta (atacante-controlado): un \n/\r
+    # embebido NO debe romper la fila del CSV (igual que se hace con notes).
+    db = database.SessionLocal()
+    try:
+        conv = models.Conversation(session_id="lead_inj", project="agencia", channel="lead_ad")
+        db.add(conv)
+        db.flush()
+        db.add(models.Lead(
+            conversation_id=conv.id, project="agencia", name="Inj",
+            interests=["mensaje: hola\nFAKE,row,injected", "otro: val\rmás"],
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    r = client.get("/leads/export.csv", headers=ADMIN)
+    assert r.status_code == 200
+    body = r.text
+    assert "\nFAKE,row,injected" not in body
+    assert "\rmás" not in body
+    # El contenido sigue presente, solo con los saltos neutralizados a espacio.
+    assert "mensaje: hola FAKE,row,injected" in body
+    assert "otro: val más" in body
+    # Header + exactamente 1 fila de datos (la inyección no creó filas extra).
+    assert len([ln for ln in body.splitlines() if ln.strip()]) == 2

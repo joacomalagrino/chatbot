@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from config import PROJECTS, get_settings
 from database import SessionLocal
 from models import Conversation, Lead, ProcessedEvent
+from ratelimit import limiter
 from services.conversation_service import get_or_create_conversation, record_turn
 from services.meta_service import (
     get_lead_data,
@@ -85,6 +86,9 @@ async def verify_webhook(
 
 
 @router.post("/meta")
+# Umbral alto: Meta hace ráfagas legítimas de webhooks, pero ata un techo por IP para que
+# un payload firmado capturado no se pueda reproducir sin tope (amplificando fetches a Graph).
+@limiter.limit("120/minute")
 async def receive_meta_event(request: Request, background_tasks: BackgroundTasks):
     cl = request.headers.get("content-length")
     if cl and cl.isdigit() and int(cl) > MAX_WEBHOOK_BYTES:

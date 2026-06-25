@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     # Auth de endpoints internos (/leads, /ads). Sin esto, esos endpoints quedan cerrados.
     admin_api_key: str = ""
 
+    # Webhook opcional (Slack/Discord/Make/etc.) para avisar cuando entra un lead caliente.
+    # Si está vacío, solo se loguea. Best-effort: nunca bloquea ni rompe el flujo.
+    notify_webhook_url: str = ""
+
     # CORS: dominios donde se EMBEBE el widget (el Origin de los requests cross-origin),
     # separados por coma. Default = los sitios propios de los 3 proyectos (NO "*", para
     # no quedar abierto a cualquier sitio en prod). En modo dev (CHATBOT_DEV=1) se abre a

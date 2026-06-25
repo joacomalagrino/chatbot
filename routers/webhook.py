@@ -21,6 +21,7 @@ from services.meta_service import (
     send_instagram_message,
     send_whatsapp_message,
 )
+from services.notify import fire_hot_lead
 
 router = APIRouter()
 settings = get_settings()
@@ -337,3 +338,8 @@ async def _handle_lead_ad(db: Session, value: dict):
         return
 
     logger.info("Lead Ad capturado (project=%s)", project)
+    # Un Lead Ad entra directo como caliente → avisar al equipo.
+    fire_hot_lead({
+        "project": project, "channel": "lead_ad",
+        "name": name, "phone": phone, "email": email,
+    })

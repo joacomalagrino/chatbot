@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from database import get_db
-from models import Conversation, Lead
+from models import Conversation, Lead, Message
 
 router = APIRouter()
 
@@ -118,12 +118,23 @@ def lead_stats(db: Session = Depends(get_db)):
     total = db.query(func.count(Lead.id)).scalar() or 0
     week_ago = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=7)
     last_7d = db.query(func.count(Lead.id)).filter(Lead.created_at >= week_ago).scalar() or 0
+
+    # Métricas de conversación: tasa de calificados sobre el total y promedio de
+    # mensajes por conversación (señal de cuánto "engancha" el bot).
+    conv_total = db.query(func.count(Conversation.id)).scalar() or 0
+    msg_total = db.query(func.count(Message.id)).scalar() or 0
+    qualified = by_status.get("qualified", 0)
+    conversion_rate = round(qualified / total, 3) if total else 0.0
+    avg_messages = round(msg_total / conv_total, 1) if conv_total else 0.0
+
     return {
         "total": total,
         "last_7d": last_7d,
         "by_status": by_status,
         "by_project": by_project,
         "by_channel": by_channel,
+        "conversion_rate": conversion_rate,
+        "avg_messages": avg_messages,
     }
 
 

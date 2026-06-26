@@ -16,7 +16,7 @@ def client(monkeypatch):
     async def fake_ai(p, c, m, h): return "ok"
     async def fake_send(*a, **k): return {"ok": True}
     monkeypatch.setattr(convsvc, "get_ai_response", fake_ai)
-    monkeypatch.setattr(webhook, "send_whatsapp_message", fake_send)
+    monkeypatch.setattr(webhook, "send_whatsapp_reply", fake_send)
     monkeypatch.setattr(webhook, "send_instagram_message", fake_send)
     with TestClient(main.app) as c:
         yield c

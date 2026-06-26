@@ -27,6 +27,9 @@ class Conversation(Base):
     contact_email = Column(String(200))
     contact_instagram = Column(String(100))
     status = Column(String(20), default="new", index=True)  # new | warm | hot | converted
+    # Último inbound del usuario (para la ventana de 24h de WhatsApp): pasada esa ventana
+    # Graph rechaza el free-form y hay que mandar una plantilla. Naive UTC como el resto.
+    last_inbound_at = Column(DateTime)
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 

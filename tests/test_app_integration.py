@@ -32,7 +32,7 @@ def client(monkeypatch):
 
     # Evitar llamadas reales a Claude y a Meta.
     monkeypatch.setattr(convsvc, "get_ai_response", fake_ai)
-    monkeypatch.setattr(webhook, "send_whatsapp_message", fake_send)
+    monkeypatch.setattr(webhook, "send_whatsapp_reply", fake_send)
     monkeypatch.setattr(webhook, "send_instagram_message", fake_send)
 
     with TestClient(main.app) as c:
@@ -178,6 +178,53 @@ def test_webhook_whatsapp_creates_conversation_messages_and_lead(client):
         assert leads[0].instagram is None  # el @ del email NO es handle de IG
     finally:
         db.close()
+
+
+def test_webhook_whatsapp_stamps_last_inbound_at(client):
+    """El inbound de WhatsApp persiste last_inbound_at (reabre la ventana de 24h)."""
+    from datetime import datetime, timedelta, timezone
+
+    def _utcnow():
+        return datetime.now(timezone.utc).replace(tzinfo=None)
+
+    before = _utcnow() - timedelta(seconds=2)
+    body = json.dumps(_wa_payload("wamid.IN", "5491100009999", "hola")).encode()
+    r = client.post("/webhook/meta", content=body, headers={"X-Hub-Signature-256": _sign(body)})
+    assert r.status_code == 200
+    after = _utcnow() + timedelta(seconds=2)
+
+    db = database.SessionLocal()
+    try:
+        conv = db.query(models.Conversation).filter_by(session_id="wa_5491100009999").first()
+        assert conv is not None
+        assert conv.last_inbound_at is not None
+        # Naive UTC, fresco (entre before/after): la ventana queda abierta.
+        assert before <= conv.last_inbound_at <= after
+    finally:
+        db.close()
+
+
+def test_webhook_whatsapp_routes_reply_through_window(client, monkeypatch):
+    """El webhook delega el envío en send_whatsapp_reply pasándole last_inbound_at, para
+    que la decisión free-form/plantilla viva en un solo lugar."""
+    captured = {}
+
+    async def capture_send(phone, text, last_inbound_at):
+        captured["phone"] = phone
+        captured["text"] = text
+        captured["last_inbound_at"] = last_inbound_at
+        return {"ok": True}
+
+    monkeypatch.setattr(webhook, "send_whatsapp_reply", capture_send)
+    body = json.dumps(_wa_payload("wamid.RT", "5491100007777", "hola")).encode()
+    r = client.post("/webhook/meta", content=body, headers={"X-Hub-Signature-256": _sign(body)})
+    assert r.status_code == 200
+
+    assert captured["phone"] == "5491100007777"
+    assert captured["text"] == "respuesta de prueba"
+    # Recibe el timestamp recién registrado => is_within_24h_window daría True.
+    assert captured["last_inbound_at"] is not None
+    assert meta_service.is_within_24h_window(captured["last_inbound_at"]) is True
 
 
 def test_webhook_idempotent_on_retry(client):
@@ -340,7 +387,7 @@ def test_send_failure_does_not_break_processing(client, monkeypatch):
     async def failing_send(*args, **kwargs):
         raise RuntimeError("Meta rechazó el envío")
 
-    monkeypatch.setattr(webhook, "send_whatsapp_message", failing_send)
+    monkeypatch.setattr(webhook, "send_whatsapp_reply", failing_send)
     body = json.dumps(_wa_payload("wamid.SENDFAIL", "5491100002222", "hola")).encode()
     r = client.post("/webhook/meta", content=body, headers={"X-Hub-Signature-256": _sign(body)})
     assert r.status_code == 200
@@ -366,7 +413,7 @@ def test_send_failure_does_not_skip_later_messages_in_batch(client, monkeypatch)
             raise RuntimeError("Meta rechazó el envío al primero")
         return {"ok": True}
 
-    monkeypatch.setattr(webhook, "send_whatsapp_message", send_first_fails)
+    monkeypatch.setattr(webhook, "send_whatsapp_reply", send_first_fails)
 
     # Un solo webhook con DOS mensajes (distinto remitente): el 1ro falla el envío.
     body = json.dumps({

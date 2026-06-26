@@ -10,12 +10,19 @@ Verifican que la baseline:
 import sqlalchemy as sa
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
+from alembic.script import ScriptDirectory
 
 import database
 import models
 from database import SessionLocal
 
 APP_TABLES = {"conversations", "messages", "leads", "processed_events"}
+
+
+def _head_revision():
+    """La revisión HEAD según los archivos de migración (no hardcodear: a medida que
+    se agregan migraciones, init_db lleva la DB al HEAD actual, no al baseline)."""
+    return ScriptDirectory.from_config(database._alembic_config()).get_current_head()
 
 
 def _reset_db():
@@ -47,7 +54,7 @@ def test_fresh_db_runs_all_migrations():
     names = _table_names()
     assert APP_TABLES <= names
     assert "alembic_version" in names
-    assert _alembic_version() == database.BASELINE_REVISION
+    assert _alembic_version() == _head_revision()
 
 
 def test_adopts_preexisting_db_without_data_loss():
@@ -62,9 +69,11 @@ def test_adopts_preexisting_db_without_data_loss():
     cid = conv.id
     db.close()
 
-    database.init_db()  # debe adoptar (stamp), no recrear
+    database.init_db()  # debe adoptar (stamp baseline) y luego aplicar lo pendiente
 
-    assert _alembic_version() == database.BASELINE_REVISION
+    # Tras adoptar el baseline, init_db sigue aplicando las migraciones posteriores
+    # (ej. 0002 last_inbound_at) hasta HEAD, sin perder los datos preexistentes.
+    assert _alembic_version() == _head_revision()
     db = SessionLocal()
     got = db.get(models.Conversation, cid)
     assert got is not None and got.session_id == "sess-preexist"
@@ -75,7 +84,7 @@ def test_idempotent_second_run():
     _reset_db()
     database.init_db()
     database.init_db()  # no debe romper ni cambiar la versión
-    assert _alembic_version() == database.BASELINE_REVISION
+    assert _alembic_version() == _head_revision()
 
 
 def test_no_drift_baseline_matches_models():

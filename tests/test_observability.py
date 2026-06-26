@@ -42,7 +42,7 @@ def client(monkeypatch):
         return {}
 
     monkeypatch.setattr(convsvc, "get_ai_response", fake_ai)
-    monkeypatch.setattr(webhook, "send_whatsapp_message", fake_send)
+    monkeypatch.setattr(webhook, "send_whatsapp_reply", fake_send)
     monkeypatch.setattr(webhook, "send_instagram_message", fake_send)
     # Aislar el registro en memoria entre tests.
     observability.clear_errors()
@@ -162,7 +162,7 @@ def test_fallo_de_envio_se_registra(client, monkeypatch):
     async def failing_send(*a, **k):
         raise RuntimeError("Meta rechazó el envío")
 
-    monkeypatch.setattr(webhook, "send_whatsapp_message", failing_send)
+    monkeypatch.setattr(webhook, "send_whatsapp_reply", failing_send)
     body = _wa("wamid.SF", "5491100002222", "hola")
     r = client.post("/webhook/meta", content=body, headers={"X-Hub-Signature-256": _sign(body)})
     assert r.status_code == 200

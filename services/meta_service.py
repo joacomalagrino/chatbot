@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -110,6 +111,25 @@ async def _post_with_retry(url: str, payload: dict, headers: dict, attempts: int
     return await _request_with_retry("POST", url, headers, attempts=attempts, payload=payload)
 
 
+# Ventana de servicio de WhatsApp: Graph solo acepta free-form (type:text) dentro de
+# las 24h posteriores al último inbound del usuario. Pasada esa ventana hay que mandar
+# una plantilla (type:template) previamente aprobada en Meta.
+WHATSAPP_WINDOW = timedelta(hours=24)
+
+
+def is_within_24h_window(last_inbound_at: datetime | None, now: datetime | None = None) -> bool:
+    """¿Sigue abierta la ventana de servicio de 24h?
+
+    `last_inbound_at` es naive UTC (como las columnas DateTime del modelo). None
+    (conversación sin inbound registrado, o anterior a esta feature) cuenta como
+    ventana CERRADA: fail-safe hacia plantilla, nunca hacia un free-form que Graph
+    rechazaría. `now` es inyectable para los tests."""
+    if last_inbound_at is None:
+        return False
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    return (now - last_inbound_at) < WHATSAPP_WINDOW
+
+
 async def send_whatsapp_message(phone: str, text: str) -> dict:
     url = f"{META_API_BASE}/{settings.meta_whatsapp_phone_id}/messages"
     headers = {"Authorization": f"Bearer {settings.meta_access_token}"}
@@ -120,6 +140,72 @@ async def send_whatsapp_message(phone: str, text: str) -> dict:
         "text": {"body": text},
     }
     return await _post_with_retry(url, payload, headers)
+
+
+async def send_whatsapp_template(
+    phone: str,
+    template_name: str,
+    lang_code: str = "es_AR",
+    body_params: list[str] | None = None,
+) -> dict:
+    """Manda un mensaje de PLANTILLA (type:template) por la Graph API.
+
+    Las plantillas se crean y aprueban en Meta (WhatsApp Manager) — eso es tarea del
+    usuario, fuera de este código. Acá solo armamos el payload con el `template_name`
+    aprobado y, opcionalmente, los parámetros que llenan los placeholders {{1}}, {{2}}…
+    del body de la plantilla.
+
+    A diferencia del free-form, una plantilla aprobada SÍ se puede enviar fuera de la
+    ventana de 24h: es lo que permite re-enganchar a un lead que se enfrió."""
+    url = f"{META_API_BASE}/{settings.meta_whatsapp_phone_id}/messages"
+    headers = {"Authorization": f"Bearer {settings.meta_access_token}"}
+    template: dict = {
+        "name": template_name,
+        "language": {"code": lang_code},
+    }
+    if body_params:
+        template["components"] = [{
+            "type": "body",
+            "parameters": [{"type": "text", "text": str(p)} for p in body_params],
+        }]
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": normalize_ar_whatsapp(phone),
+        "type": "template",
+        "template": template,
+    }
+    return await _post_with_retry(url, payload, headers)
+
+
+async def send_whatsapp_reply(
+    phone: str, text: str, last_inbound_at: datetime | None
+) -> dict | None:
+    """Envía la respuesta de WhatsApp eligiendo el tipo según la ventana de 24h.
+
+    - Ventana ABIERTA → free-form (type:text) con el texto generado por el bot.
+    - Ventana CERRADA → plantilla de re-engagement (WHATSAPP_REENGAGE_TEMPLATE).
+
+    Si la ventana cerró y NO hay plantilla configurada, NO se manda un free-form (Graph
+    lo rechazaría con error y se perdería igual): se loguea y se devuelve None para que
+    el caller lo trate como no-entregado. Cuando la plantilla está configurada, el texto
+    del bot se pasa como primer parámetro {{1}} por si la plantilla aprobada en Meta tiene
+    un placeholder de cuerpo."""
+    if is_within_24h_window(last_inbound_at):
+        return await send_whatsapp_message(phone, text)
+
+    template = settings.whatsapp_reengage_template
+    if not template:
+        logger.warning(
+            "Ventana de 24h cerrada y WHATSAPP_REENGAGE_TEMPLATE sin configurar: "
+            "no se puede reabrir la conversación, mensaje omitido"
+        )
+        return None
+    return await send_whatsapp_template(
+        phone,
+        template,
+        lang_code=settings.whatsapp_reengage_template_lang,
+        body_params=[text],
+    )
 
 
 async def send_instagram_message(instagram_user_id: str, text: str) -> dict:

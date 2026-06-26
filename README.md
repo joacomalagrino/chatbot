@@ -58,6 +58,8 @@ Copiá `.env.example` a `.env` y completá las variables. Las más importantes:
 | `ALLOW_UNSIGNED_WEBHOOKS` | **Solo dev** (NO en prod): si vale `1` y falta `META_APP_SECRET`, acepta webhooks sin validar la firma. Por default `0` (fail-closed). |
 | `META_ACCESS_TOKEN` | Token de la Graph API para responder mensajes y traer datos de Lead Ads. |
 | `META_WHATSAPP_PHONE_ID`, `META_INSTAGRAM_ACCOUNT_ID` | IDs de los canales de Meta. |
+| `WHATSAPP_REENGAGE_TEMPLATE` | Nombre EXACTO de una plantilla aprobada en Meta, para re-enganchar a un lead fuera de la ventana de 24h. Vacío = no se reabre la conversación fuera de ventana. Ver "Ventana de 24h de WhatsApp". |
+| `WHATSAPP_REENGAGE_TEMPLATE_LANG` | Código de idioma de esa plantilla (default `es_AR`). Debe coincidir con el aprobado en Meta. |
 | `ALLOWED_ORIGINS` | CORS: dominios del widget separados por coma, o `*`. |
 | `WHATSAPP_NUMBER_TO_PROJECT`, `LEAD_FORM_TO_PROJECT` | Ruteo opcional (JSON) de número/formulario a proyecto. Si vacío, todo cae en `agencia`. |
 | `NOTIFY_WEBHOOK_URL` | Opcional: webhook (Slack/Discord/Make/etc.) para avisar cuando entra un lead caliente. Vacío = solo log. |
@@ -111,6 +113,38 @@ DATABASE_URL="sqlite:///./dev.db" alembic upgrade head
 
 El test `tests/test_migrations.py::test_no_drift_baseline_matches_models` falla si se
 cambia un modelo sin generar la migración correspondiente.
+
+## Ventana de 24h de WhatsApp
+
+WhatsApp solo deja mandar mensajes **free-form** (`type:text`) dentro de las **24h**
+posteriores al último mensaje del usuario (la "ventana de servicio"). Pasada esa ventana,
+la Graph API rechaza el free-form: para volver a escribirle al lead hay que usar una
+**plantilla** (`type:template`) previamente aprobada por Meta.
+
+Cómo lo maneja el código (`services/meta_service.py`):
+
+- Cada inbound de WhatsApp guarda `conversations.last_inbound_at` (reabre la ventana).
+- `is_within_24h_window(last_inbound_at)` decide si la ventana sigue abierta
+  (`None` = cerrada, fail-safe hacia plantilla).
+- `send_whatsapp_reply(phone, text, last_inbound_at)` rutea el envío:
+  **ventana abierta → free-form**; **cerrada → plantilla** `WHATSAPP_REENGAGE_TEMPLATE`.
+- `send_whatsapp_template(phone, name, lang_code, body_params)` arma y manda la plantilla.
+
+### Qué tenés que hacer vos en Meta (fuera del código)
+
+Las plantillas **se crean y se aprueban en Meta**; el código no las puede crear. Para
+habilitar el re-engagement fuera de ventana:
+
+1. En **WhatsApp Manager → Plantillas de mensajes**, creá una plantilla de categoría
+   *Marketing* (o *Utility*, según el caso) y mandala a aprobación. Si querés insertar el
+   texto generado por el bot, usá un placeholder de cuerpo `{{1}}` (se completa con el
+   primer `body_param`).
+2. Esperá a que Meta la **apruebe**.
+3. Seteá el **nombre exacto** de la plantilla aprobada en `WHATSAPP_REENGAGE_TEMPLATE`
+   (y `WHATSAPP_REENGAGE_TEMPLATE_LANG` si el idioma no es `es_AR`).
+
+Sin `WHATSAPP_REENGAGE_TEMPLATE` configurada, los envíos fuera de ventana se **omiten**
+(se loguea un warning) en vez de mandar un free-form que Graph rechazaría igual.
 
 ## Deploy (Railway)
 

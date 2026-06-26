@@ -20,7 +20,7 @@ from services.meta_service import (
     get_lead_data,
     parse_lead_fields,
     send_instagram_message,
-    send_whatsapp_message,
+    send_whatsapp_reply,
 )
 from services.notify import fire_hot_lead
 
@@ -300,8 +300,19 @@ async def _handle_change(db: Session, change: dict):
             conversation = get_or_create_conversation(
                 db, f"wa_{phone}", project, "whatsapp", contact_phone=phone
             )
+            # Marcar el inbound: reabre la ventana de servicio de 24h. Naive UTC para
+            # igualar las columnas DateTime del modelo. Se persiste con el turno (record_turn
+            # commitea) para que un envío proactivo posterior sepa si la ventana sigue abierta.
+            conversation.last_inbound_at = datetime.now(timezone.utc).replace(tzinfo=None)
             response_text = await record_turn(db, conversation, text)
-            await _deliver(send_whatsapp_message(phone, response_text), "whatsapp", conversation.id)
+            # Ruteo por ventana: con el inbound recién registrado la ventana está abierta,
+            # así que esta respuesta sale free-form. send_whatsapp_reply centraliza la
+            # decisión (abierta → free-form / cerrada → plantilla) para los envíos proactivos.
+            await _deliver(
+                send_whatsapp_reply(phone, response_text, conversation.last_inbound_at),
+                "whatsapp",
+                conversation.id,
+            )
 
     elif field == "leadgen":
         await _handle_lead_ad(db, value)

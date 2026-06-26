@@ -36,7 +36,7 @@ def fresh_db(monkeypatch):
         return {"ok": True}
 
     monkeypatch.setattr(convsvc, "get_ai_response", fake_ai)
-    monkeypatch.setattr(webhook, "send_whatsapp_message", fake_send)
+    monkeypatch.setattr(webhook, "send_whatsapp_reply", fake_send)
     monkeypatch.setattr(webhook, "send_instagram_message", fake_send)
     yield
     models.Base.metadata.drop_all(bind=database.engine)
@@ -60,11 +60,11 @@ def _counts():
 def test_handle_change_routes_text_message_to_whatsapp(fresh_db, monkeypatch):
     sent = []
 
-    async def capture(phone, text):
+    async def capture(phone, text, *args, **kwargs):
         sent.append((phone, text))
         return {"ok": True}
 
-    monkeypatch.setattr(webhook, "send_whatsapp_message", capture)
+    monkeypatch.setattr(webhook, "send_whatsapp_reply", capture)
 
     change = {
         "field": "messages",
@@ -91,10 +91,10 @@ def test_handle_change_skips_non_text_messages(fresh_db, monkeypatch):
     conversación, ni mensajes, ni claim del evento."""
     sent = []
 
-    async def capture(phone, text):
+    async def capture(phone, text, *args, **kwargs):
         sent.append((phone, text))
 
-    monkeypatch.setattr(webhook, "send_whatsapp_message", capture)
+    monkeypatch.setattr(webhook, "send_whatsapp_reply", capture)
 
     change = {
         "field": "messages",
@@ -117,10 +117,10 @@ def test_handle_change_processes_text_and_skips_non_text_in_same_batch(fresh_db,
     """Batch mixto: solo el mensaje de texto se procesa; el de tipo no-texto se saltea."""
     sent = []
 
-    async def capture(phone, text):
+    async def capture(phone, text, *args, **kwargs):
         sent.append((phone, text))
 
-    monkeypatch.setattr(webhook, "send_whatsapp_message", capture)
+    monkeypatch.setattr(webhook, "send_whatsapp_reply", capture)
 
     change = {
         "field": "messages",
@@ -145,10 +145,10 @@ def test_handle_change_processes_text_and_skips_non_text_in_same_batch(fresh_db,
 
 def test_handle_change_skips_text_message_without_from(fresh_db, monkeypatch):
     """Sin 'from' no se puede responder ni reclamar: se ignora sin tocar nada."""
-    async def capture(phone, text):
+    async def capture(phone, text, *args, **kwargs):
         raise AssertionError("no debería enviarse sin remitente")
 
-    monkeypatch.setattr(webhook, "send_whatsapp_message", capture)
+    monkeypatch.setattr(webhook, "send_whatsapp_reply", capture)
 
     change = {
         "field": "messages",

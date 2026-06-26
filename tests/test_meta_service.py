@@ -8,6 +8,7 @@ No se hace I/O real: se parchea _get_client para devolver un cliente fake con
 un .request(...) canned, y asyncio.sleep para no esperar el backoff.
 """
 import asyncio
+from datetime import datetime, timedelta
 
 import httpx
 import pytest
@@ -389,3 +390,108 @@ def test_parse_lead_fields_skips_empty_and_none():
 
 def test_parse_lead_fields_tolerates_none_input():
     assert meta_service.parse_lead_fields(None) == {}
+
+
+# ───────────────────────── ventana de 24h de WhatsApp ───────────────────────
+
+def test_window_open_when_inbound_recent():
+    recent = datetime(2026, 6, 26, 12, 0, 0)
+    now = recent + timedelta(hours=23, minutes=59)
+    assert meta_service.is_within_24h_window(recent, now=now) is True
+
+
+def test_window_closed_when_inbound_older_than_24h():
+    old = datetime(2026, 6, 26, 12, 0, 0)
+    now = old + timedelta(hours=24, minutes=1)
+    assert meta_service.is_within_24h_window(old, now=now) is False
+
+
+def test_window_closed_exactly_at_24h_boundary():
+    # 24h justas: la ventana ya NO está abierta (estricto <).
+    base = datetime(2026, 6, 26, 12, 0, 0)
+    now = base + timedelta(hours=24)
+    assert meta_service.is_within_24h_window(base, now=now) is False
+
+
+def test_window_closed_when_last_inbound_is_none():
+    # None (conversación sin inbound / anterior a la feature) = ventana cerrada (fail-safe).
+    assert meta_service.is_within_24h_window(None) is False
+
+
+# ───────────────────────── envío de plantilla (type:template) ───────────────
+
+def test_send_whatsapp_template_builds_template_payload(monkeypatch, no_sleep):
+    client = _install(monkeypatch, FakeClient([FakeResponse(200, {"messages": [{"id": "wamid"}]})]))
+    result = asyncio.run(
+        meta_service.send_whatsapp_template("+54 9 11 1234 5678", "reengage_v1", lang_code="es_AR")
+    )
+    assert result == {"messages": [{"id": "wamid"}]}
+    sent = client.last_kwargs["json"]
+    assert sent["messaging_product"] == "whatsapp"
+    assert sent["type"] == "template"
+    assert sent["to"] == "541112345678"  # normalizado igual que el free-form
+    assert sent["template"]["name"] == "reengage_v1"
+    assert sent["template"]["language"] == {"code": "es_AR"}
+    # Sin params => sin componente body.
+    assert "components" not in sent["template"]
+
+
+def test_send_whatsapp_template_includes_body_params(monkeypatch, no_sleep):
+    client = _install(monkeypatch, FakeClient([FakeResponse(200, {"ok": 1})]))
+    asyncio.run(
+        meta_service.send_whatsapp_template(
+            "5491112345678", "reengage_v1", body_params=["Hola de nuevo"]
+        )
+    )
+    components = client.last_kwargs["json"]["template"]["components"]
+    assert components == [
+        {"type": "body", "parameters": [{"type": "text", "text": "Hola de nuevo"}]}
+    ]
+
+
+# ───────────────────────── ruteo por ventana (send_whatsapp_reply) ──────────
+
+def test_reply_uses_free_form_when_window_open(monkeypatch, no_sleep):
+    client = _install(monkeypatch, FakeClient([FakeResponse(200, {"ok": 1})]))
+    recent = datetime.now() - timedelta(hours=1)
+    asyncio.run(meta_service.send_whatsapp_reply("5491112345678", "respuesta", recent))
+    sent = client.last_kwargs["json"]
+    assert sent["type"] == "text"
+    assert sent["text"] == {"body": "respuesta"}
+
+
+def test_reply_uses_template_when_window_closed(monkeypatch, no_sleep):
+    monkeypatch.setattr(meta_service.settings, "whatsapp_reengage_template", "reengage_v1")
+    monkeypatch.setattr(meta_service.settings, "whatsapp_reengage_template_lang", "es_AR")
+    client = _install(monkeypatch, FakeClient([FakeResponse(200, {"ok": 1})]))
+    old = datetime.now() - timedelta(hours=30)
+    asyncio.run(meta_service.send_whatsapp_reply("5491112345678", "respuesta", old))
+    sent = client.last_kwargs["json"]
+    assert sent["type"] == "template"
+    assert sent["template"]["name"] == "reengage_v1"
+    assert sent["template"]["language"] == {"code": "es_AR"}
+    # El texto del bot viaja como primer parámetro {{1}} de la plantilla.
+    params = sent["template"]["components"][0]["parameters"]
+    assert params == [{"type": "text", "text": "respuesta"}]
+
+
+def test_reply_window_closed_without_template_skips_send(monkeypatch, no_sleep):
+    # Ventana cerrada y sin plantilla configurada: NO se manda nada (un free-form fuera de
+    # ventana lo rechazaría Graph igual). Devuelve None y ni siquiera toca el cliente HTTP.
+    monkeypatch.setattr(meta_service.settings, "whatsapp_reengage_template", "")
+
+    def boom():
+        raise AssertionError("no debería tocar la red sin plantilla")
+
+    monkeypatch.setattr(meta_service, "_get_client", boom)
+    old = datetime.now() - timedelta(hours=30)
+    result = asyncio.run(meta_service.send_whatsapp_reply("5491112345678", "respuesta", old))
+    assert result is None
+
+
+def test_reply_window_closed_none_inbound_uses_template(monkeypatch, no_sleep):
+    # last_inbound_at=None cuenta como cerrada => plantilla (si está configurada).
+    monkeypatch.setattr(meta_service.settings, "whatsapp_reengage_template", "reengage_v1")
+    client = _install(monkeypatch, FakeClient([FakeResponse(200, {"ok": 1})]))
+    asyncio.run(meta_service.send_whatsapp_reply("5491112345678", "respuesta", None))
+    assert client.last_kwargs["json"]["type"] == "template"

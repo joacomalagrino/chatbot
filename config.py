@@ -22,6 +22,14 @@ class Settings(BaseSettings):
     meta_whatsapp_phone_id: str = ""
     meta_instagram_account_id: str = ""
 
+    # Plantilla de re-engagement de WhatsApp: nombre EXACTO de una plantilla creada y
+    # APROBADA en Meta (WhatsApp Manager). Se usa cuando la ventana de 24h ya cerró y
+    # Graph rechaza el free-form. Vacío = no se reabre la conversación (se loguea y se
+    # omite el envío en vez de mandar un free-form que Graph va a rechazar igual).
+    whatsapp_reengage_template: str = ""
+    # Código de idioma de la plantilla (debe coincidir con el aprobado en Meta).
+    whatsapp_reengage_template_lang: str = "es_AR"
+
     # Auth de endpoints internos (/leads, /ads). Sin esto, esos endpoints quedan cerrados.
     admin_api_key: str = ""
 

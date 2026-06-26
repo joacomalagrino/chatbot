@@ -32,7 +32,7 @@ def client(monkeypatch):
         return {}
 
     monkeypatch.setattr(convsvc, "get_ai_response", fake_ai)
-    monkeypatch.setattr(webhook, "send_whatsapp_message", fake_send)
+    monkeypatch.setattr(webhook, "send_whatsapp_reply", fake_send)
     monkeypatch.setattr(webhook, "send_instagram_message", fake_send)
     # Resetear el bucket en memoria por las dudas, para no heredar estado de otros tests.
     limiter.reset()

@@ -12,6 +12,25 @@ y el proyecto adhiere (con criterio flexible) a [Versionado Semántico](https://
 
 ### Added
 
+- **Ventana de 24h de WhatsApp + plantillas de re-engagement.** WhatsApp solo acepta
+  mensajes free-form (`type:text`) dentro de las 24h posteriores al último inbound del
+  usuario; pasada esa ventana Graph los rechaza y el lead se perdía. Ahora:
+  - Se persiste `conversations.last_inbound_at` (migración `0002_last_inbound_at`),
+    actualizado en cada inbound de WhatsApp en el webhook.
+  - `meta_service.is_within_24h_window()` decide si la ventana sigue abierta.
+  - `meta_service.send_whatsapp_template()` manda un mensaje de plantilla
+    (`type:template`) por la Graph API.
+  - `meta_service.send_whatsapp_reply()` rutea el envío: ventana abierta → free-form;
+    cerrada → plantilla `WHATSAPP_REENGAGE_TEMPLATE` (configurable por env). Si la
+    ventana cerró y no hay plantilla configurada, omite el envío (no manda un free-form
+    que Graph rechazaría) y lo deja logueado.
+
+  **Acción del usuario en Meta:** la plantilla de re-engagement se crea y aprueba en
+  Meta (WhatsApp Manager) — está fuera del código. Una vez aprobada, setear su nombre
+  exacto en `WHATSAPP_REENGAGE_TEMPLATE` (y el idioma en `WHATSAPP_REENGAGE_TEMPLATE_LANG`
+  si no es `es_AR`). Ver README → "Ventana de 24h de WhatsApp". +14 tests (ventana,
+  payload de plantilla, ruteo abierto/cerrado, stamp del inbound).
+
 - **Migraciones con Alembic.** El schema deja de depender de `create_all` y pasa a
   manejarse con migraciones versionadas (`migrations/`, baseline `0001_baseline` que
   reproduce exactamente el schema previo). En el arranque, `database.init_db()` hace

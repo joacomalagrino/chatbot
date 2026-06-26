@@ -1,6 +1,8 @@
 import asyncio
+import email.utils
 import logging
 import re
+from datetime import datetime, timezone
 
 import httpx
 
@@ -20,6 +22,50 @@ _GRAPH_ID_RE = re.compile(r"^[0-9]+$")
 # Timeout granular: connect corto, read más largo (Graph puede tardar).
 _TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
 _RETRY_STATUSES = {429, 500, 502, 503, 504}
+
+# Cap del backoff. También topa el Retry-After de Meta: un valor disparatado (o malicioso)
+# no debe dejar la tarea de background colgada minutos esperando.
+_MAX_BACKOFF_S = 8
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Parsea el header Retry-After (RFC 7231): segundos (delta) o fecha HTTP.
+
+    Devuelve los segundos a esperar (>= 0, capados a _MAX_BACKOFF_S), o None si el
+    header falta o no se puede interpretar. Meta lo manda en sus 429 para indicar
+    cuándo reintentar; respetarlo es mejor que un backoff a ciegas."""
+    if not value:
+        return None
+    value = value.strip()
+    try:
+        # Forma más común: un entero de segundos.
+        return min(max(float(value), 0.0), _MAX_BACKOFF_S)
+    except ValueError:
+        pass
+    # Forma alternativa: una fecha HTTP (ej. "Wed, 21 Oct 2025 07:28:00 GMT").
+    try:
+        parsed = email.utils.parsedate_to_datetime(value)
+    except (ValueError, TypeError):
+        # parsedate_to_datetime lanza ValueError ante formato inválido (Python 3.10+).
+        return None
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    delta = (parsed - datetime.now(timezone.utc)).total_seconds()
+    return min(max(delta, 0.0), _MAX_BACKOFF_S)
+
+
+def _backoff_delay(attempt: int, response: httpx.Response | None = None) -> float:
+    """Cuánto esperar antes del siguiente intento.
+
+    Si la respuesta trae Retry-After (típico en 429), se respeta (capado). Si no,
+    cae al backoff exponencial clásico min(2**attempt, _MAX_BACKOFF_S)."""
+    if response is not None:
+        retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+        if retry_after is not None:
+            return retry_after
+    return min(2 ** attempt, _MAX_BACKOFF_S)
 
 # Cliente reutilizable: evita rehacer el handshake TLS a graph.facebook.com en
 # cada mensaje. Se cierra en el shutdown del app (main.lifespan).
@@ -79,12 +125,13 @@ async def _request_with_retry(
                 # solo el id de Graph en el path (numérico), sin PII del lead.
                 record_error("meta_service.request", exc, method=method.upper(), url=url)
                 raise
-            await asyncio.sleep(min(2 ** i, 8))
+            await asyncio.sleep(_backoff_delay(i))
             continue
 
         if r.status_code in _RETRY_STATUSES and not last:
             logger.warning("Meta %s transitorio (%s), reintento", url, r.status_code)
-            await asyncio.sleep(min(2 ** i, 8))
+            # Respeta Retry-After si Meta lo manda (típico en 429); si no, backoff exponencial.
+            await asyncio.sleep(_backoff_delay(i, r))
             continue
 
         if not r.is_success:

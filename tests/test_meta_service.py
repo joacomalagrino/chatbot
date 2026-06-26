@@ -18,10 +18,12 @@ import services.meta_service as meta_service
 class FakeResponse:
     """Imita lo que _request_with_retry consume de httpx.Response."""
 
-    def __init__(self, status_code, json_data=None, text=""):
+    def __init__(self, status_code, json_data=None, text="", headers=None):
         self.status_code = status_code
         self._json = json_data if json_data is not None else {}
         self.text = text
+        # httpx.Response siempre expone .headers; vacío salvo que el test pase Retry-After.
+        self.headers = headers if headers is not None else {}
 
     @property
     def is_success(self):
@@ -179,6 +181,89 @@ def test_backoff_is_capped_at_8(monkeypatch, no_sleep):
     with pytest.raises(httpx.HTTPStatusError):
         asyncio.run(meta_service._request_with_retry("POST", "https://x", {}, attempts=6))
     assert no_sleep == [1, 2, 4, 8, 8]
+
+
+# ───────────────────────── Retry-After (header de Meta en 429) ──────────────
+
+def test_429_with_retry_after_seconds_is_respected(monkeypatch, no_sleep):
+    # Meta manda Retry-After: 3 en el 429 => se espera 3s (no el backoff 2**0=1).
+    client = _install(monkeypatch, FakeClient([
+        FakeResponse(429, headers={"Retry-After": "3"}),
+        FakeResponse(200, {"ok": 1}),
+    ]))
+    result = asyncio.run(meta_service._request_with_retry("POST", "https://x", {}))
+    assert result == {"ok": 1}
+    assert no_sleep == [3]
+
+
+def test_retry_after_is_capped(monkeypatch, no_sleep):
+    # Un Retry-After disparatado no debe colgar la tarea: se capa a _MAX_BACKOFF_S.
+    client = _install(monkeypatch, FakeClient([
+        FakeResponse(429, headers={"Retry-After": "999"}),
+        FakeResponse(200, {"ok": 1}),
+    ]))
+    asyncio.run(meta_service._request_with_retry("POST", "https://x", {}))
+    assert no_sleep == [meta_service._MAX_BACKOFF_S]
+
+
+def test_retry_after_http_date_is_respected(monkeypatch, no_sleep):
+    # Retry-After también puede venir como fecha HTTP: ~5s en el futuro => se espera ~5s.
+    import email.utils
+    from datetime import datetime, timedelta, timezone
+
+    future = datetime.now(timezone.utc) + timedelta(seconds=5)
+    http_date = email.utils.format_datetime(future)
+    client = _install(monkeypatch, FakeClient([
+        FakeResponse(429, headers={"Retry-After": http_date}),
+        FakeResponse(200, {"ok": 1}),
+    ]))
+    asyncio.run(meta_service._request_with_retry("POST", "https://x", {}))
+    assert len(no_sleep) == 1
+    # Tolerancia por el tiempo de cómputo; nunca negativo, nunca sobre el cap.
+    assert 3.0 <= no_sleep[0] <= meta_service._MAX_BACKOFF_S
+
+
+def test_falls_back_to_exponential_without_retry_after(monkeypatch, no_sleep):
+    # 503 sin Retry-After => backoff exponencial clásico (2**0=1).
+    client = _install(monkeypatch, FakeClient([
+        FakeResponse(503),
+        FakeResponse(200, {"ok": 1}),
+    ]))
+    asyncio.run(meta_service._request_with_retry("POST", "https://x", {}))
+    assert no_sleep == [1]
+
+
+def test_malformed_retry_after_falls_back_to_exponential(monkeypatch, no_sleep):
+    # Retry-After ilegible => se ignora y cae al backoff exponencial.
+    client = _install(monkeypatch, FakeClient([
+        FakeResponse(429, headers={"Retry-After": "manaña"}),
+        FakeResponse(200, {"ok": 1}),
+    ]))
+    asyncio.run(meta_service._request_with_retry("POST", "https://x", {}))
+    assert no_sleep == [1]
+
+
+def test_network_error_uses_exponential_backoff_not_retry_after(monkeypatch, no_sleep):
+    # Sin respuesta (red/timeout) no hay header que respetar: backoff exponencial.
+    client = _install(monkeypatch, FakeClient([
+        httpx.ConnectError("boom"),
+        FakeResponse(200, {"ok": 1}),
+    ]))
+    asyncio.run(meta_service._request_with_retry("GET", "https://x", {}))
+    assert no_sleep == [1]
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("5", 5.0),
+    ("0", 0.0),
+    ("-3", 0.0),          # nunca negativo
+    ("999", 8.0),         # capado
+    ("", None),
+    (None, None),
+    ("not-a-date", None),
+])
+def test_parse_retry_after_unit(raw, expected):
+    assert meta_service._parse_retry_after(raw) == expected
 
 
 # ───────────────────────── método: GET usa params, POST usa json ───────────

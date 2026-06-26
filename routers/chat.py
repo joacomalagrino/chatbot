@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from config import PROJECTS
 from database import SessionLocal, get_db
+from models import Message
 from ratelimit import limiter
 from services.conversation_service import (
     get_or_create_conversation,
@@ -18,6 +19,25 @@ from services.conversation_service import (
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# Sugerir otros canales tras 3 intercambios completos (6 mensajes).
+SUGGEST_AFTER_MESSAGES = 6
+
+
+def _should_suggest_channels(db: Session, conversation_id) -> bool:
+    """¿La conversación ya llegó al umbral de mensajes para sugerir otros canales?
+
+    Cuenta a nivel query con .limit(SUGGEST_AFTER_MESSAGES) en vez de `len(conversation.messages)`,
+    que materializaría TODA la colección lazy en cada turno (en WhatsApp la conversación persiste
+    indefinidamente). Solo necesitamos saber si hay >= umbral, así que basta con contar hasta ahí.
+    """
+    count = (
+        db.query(Message.id)
+        .filter(Message.conversation_id == conversation_id)
+        .limit(SUGGEST_AFTER_MESSAGES)
+        .count()
+    )
+    return count >= SUGGEST_AFTER_MESSAGES
 
 
 class ChatRequest(BaseModel):
@@ -44,8 +64,7 @@ async def chat(request: Request, payload: ChatRequest, db: Session = Depends(get
     )
     response_text = await record_turn(db, conversation, payload.message)
 
-    # Sugerir otros canales tras 3 intercambios completos (6 mensajes).
-    suggest = len(conversation.messages) >= 6
+    suggest = _should_suggest_channels(db, conversation.id)
 
     return ChatResponse(
         response=response_text,
@@ -76,8 +95,7 @@ async def chat_stream(request: Request, payload: ChatRequest):
             async for delta in stream_turn(db, conversation, payload.message):
                 yield f"data: {json.dumps({'delta': delta})}\n\n"
 
-            # Sugerir otros canales tras 3 intercambios completos (6 mensajes), igual que /chat.
-            suggest = len(conversation.messages) >= 6
+            suggest = _should_suggest_channels(db, conversation.id)
             yield f"data: {json.dumps({'done': True, 'suggest_channels': suggest})}\n\n"
         except Exception:
             logger.exception("Error en /chat/stream")

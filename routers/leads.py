@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from database import get_db
 from models import Conversation, Lead, Message
+from observability import error_count, recent_errors
 from ratelimit import limiter
 
 router = APIRouter()
@@ -149,6 +150,19 @@ def lead_stats(request: Request, db: Session = Depends(get_db)):
         "conversion_rate": conversion_rate,
         "avg_messages": avg_messages,
     }
+
+
+@router.get("/errors")
+@limiter.limit(_ADMIN_RATE)
+def recent_errors_view(request: Request):
+    """Últimos errores registrados (en memoria) para ver "qué falló últimamente" sin entrar
+    a los logs de Railway. Cubre los fallos que serían SILENCIOSOS: tareas en background del
+    webhook, fetches a Graph y guardado de leads.
+
+    Protegido por la misma auth admin (require_admin se aplica a todo el router /leads).
+    Es best-effort y por worker: en memoria, se reinicia con cada deploy/restart.
+    """
+    return {"count": error_count(), "errors": recent_errors()}
 
 
 class StatusUpdate(BaseModel):

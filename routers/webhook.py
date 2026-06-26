@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from config import PROJECTS, get_settings
 from database import SessionLocal
 from models import Conversation, Lead, ProcessedEvent
+from observability import record_error
 from services.conversation_service import get_or_create_conversation, record_turn
 from services.meta_service import (
     get_lead_data,
@@ -112,7 +113,13 @@ async def receive_meta_event(request: Request, background_tasks: BackgroundTasks
 
 
 async def _process_event(body: dict):
-    """Procesa el webhook con su propia sesión de DB (la de get_db ya está cerrada)."""
+    """Procesa el webhook con su propia sesión de DB (la de get_db ya está cerrada).
+
+    Esta tarea corre en BACKGROUND (background_tasks.add_task): FastAPI NO reporta sus
+    excepciones, así que cualquier fallo acá sería silencioso = lead perdido. El except
+    global LOGUEA con contexto y además lo deja en el registro de errores recientes
+    (observability.record_error) para verlo desde el panel sin entrar a los logs de Railway.
+    """
     db = SessionLocal()
     try:
         for entry in body.get("entry", []):
@@ -122,8 +129,16 @@ async def _process_event(body: dict):
             # WhatsApp y Lead Ads llegan bajo `changes`.
             for change in entry.get("changes", []):
                 await _handle_change(db, change)
-    except Exception:
-        logger.exception("Error procesando webhook Meta")
+    except Exception as exc:
+        # Qué campos trae el webhook ayuda a saber qué se perdió, sin volcar PII del lead.
+        fields = sorted({
+            change.get("field")
+            for entry in body.get("entry", [])
+            for change in entry.get("changes", [])
+            if change.get("field")
+        })
+        logger.exception("Error procesando webhook Meta (fields=%s)", fields)
+        record_error("webhook._process_event", exc, fields=fields)
     finally:
         db.close()
 
@@ -224,12 +239,15 @@ async def _deliver(send_coro, channel: str, conversation_id) -> bool:
     try:
         await send_coro
         return True
-    except Exception:
+    except Exception as exc:
         logger.exception(
             "ENVÍO NO ENTREGADO (channel=%s conversation=%s): respuesta generada y "
             "persistida pero no enviada; requiere reintento fuera de banda",
             channel,
             conversation_id,
+        )
+        record_error(
+            "webhook._deliver", exc, channel=channel, conversation_id=str(conversation_id)
         )
         return False
 
@@ -334,11 +352,14 @@ async def _handle_lead_ad(db: Session, value: dict):
 
     try:
         db.commit()
-    except IntegrityError:
+    except IntegrityError as exc:
         # Falló la persistencia del Lead: liberar el ProcessedEvent reclamado para que
         # un reintento de Meta pueda volver a procesar (si no, el lead se perdería).
         db.rollback()
-        logger.exception("IntegrityError guardando Lead Ad")
+        logger.exception("IntegrityError guardando Lead Ad (project=%s)", project)
+        record_error(
+            "webhook._handle_lead_ad", exc, project=project, leadgen_id=str(leadgen_id)
+        )
         _release_event(db, event_id)
         return
 

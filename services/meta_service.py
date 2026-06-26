@@ -5,6 +5,7 @@ import re
 import httpx
 
 from config import get_settings
+from observability import record_error
 from services.text_utils import normalize_ar_whatsapp
 
 logger = logging.getLogger(__name__)
@@ -71,9 +72,12 @@ async def _request_with_retry(
                 json=payload if method.upper() != "GET" else None,
                 params=params if method.upper() == "GET" else None,
             )
-        except (httpx.TransportError, httpx.TimeoutException):
+        except (httpx.TransportError, httpx.TimeoutException) as exc:
             if last:
                 logger.exception("Meta %s falló por red/timeout en %s", method.upper(), url)
+                # Fetch a Graph agotado (red/timeout): registrar para el panel. `url` lleva
+                # solo el id de Graph en el path (numérico), sin PII del lead.
+                record_error("meta_service.request", exc, method=method.upper(), url=url)
                 raise
             await asyncio.sleep(min(2 ** i, 8))
             continue
@@ -85,7 +89,15 @@ async def _request_with_retry(
 
         if not r.is_success:
             # No logueamos r.text: puede contener datos del destinatario/lead.
-            logger.error("Meta API error %s en %s (%s)", r.status_code, url, _error_summary(r))
+            summary = _error_summary(r)
+            logger.error("Meta API error %s en %s (%s)", r.status_code, url, summary)
+            record_error(
+                "meta_service.request",
+                method=method.upper(),
+                url=url,
+                status=r.status_code,
+                summary=summary,
+            )
         r.raise_for_status()
         return r.json()
 

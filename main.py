@@ -13,12 +13,17 @@ from sqlalchemy import text
 from auth import require_admin
 from config import get_settings
 from database import engine, init_db
+from observability import configure_logging
 from ratelimit import limiter
 from services import meta_service
 from routers.ads import router as ads_router
 from routers.chat import router as chat_router
 from routers.leads import router as leads_router
 from routers.webhook import router as webhook_router
+
+# Logging estructurado (timestamp/nivel/módulo, nivel por LOG_LEVEL) lo antes posible, para
+# que cualquier log del arranque (incl. fallos de init_db) salga ya con el formato consistente.
+configure_logging()
 
 logger = logging.getLogger(__name__)
 settings = get_settings()

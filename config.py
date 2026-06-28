@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     # (default) => el servicio no manda nada. Si se deja vacío pero hay WHATSAPP_REENGAGE_TEMPLATE
     # configurada, se reusa esa (un solo nombre de plantilla sirve para ambos usos).
     reengage_template_name: str = Field(default="", validation_alias="REENGAGE_TEMPLATE_NAME")
+    # Palabras de baja del re-engagement: si un inbound de WhatsApp matchea (exacto, tras
+    # trim + case-insensitive) alguna de estas, se marca reengage_opt_out=True en esa
+    # conversación y el selector deja de re-engancharla. Coma-separadas y ajustable por entorno.
+    reengage_optout_keywords: str = Field(
+        default="BAJA,STOP,CANCELAR", validation_alias="REENGAGE_OPTOUT_KEYWORDS"
+    )
 
     # Auth de endpoints internos (/leads, /ads). Sin esto, esos endpoints quedan cerrados.
     admin_api_key: str = ""
@@ -87,6 +93,17 @@ class Settings(BaseSettings):
         Doble gate: el flag prendido Y una plantilla aprobada cargada. Cualquiera de los
         dos en falso => NO-OP seguro (el servicio no manda nada)."""
         return bool(self.reengage_enabled) and bool(self.reengage_template())
+
+    def optout_keywords(self) -> set[str]:
+        """Palabras de baja normalizadas (trim + casefold) para comparar contra el inbound.
+
+        Vacío => set vacío (no se detecta opt-out). El caller normaliza el mensaje igual
+        antes de comparar, así el match es case-insensitive y tolera espacios."""
+        return {
+            kw.strip().casefold()
+            for kw in (self.reengage_optout_keywords or "").split(",")
+            if kw.strip()
+        }
 
     def wa_number_map(self) -> dict:
         return _parse_json_map(self.whatsapp_number_to_project)

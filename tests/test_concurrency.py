@@ -174,3 +174,85 @@ def test_concurrent_same_event_processed_once(fresh_db):
         assert db.query(models.ProcessedEvent).count() == 1
     finally:
         db.close()
+
+
+def test_whatsapp_transient_failure_releases_claim_so_retry_recovers(fresh_db, monkeypatch):
+    """Si record_turn falla en la 1ª entrega (timeout de Claude, hipo de DB —más probable
+    bajo ráfaga), el evento reclamado se LIBERA: el reintento de Meta (mismo wamid) reprocesa
+    y el lead recibe respuesta. Sin el _release_event, el claim quedaba quemado y el inbound
+    se PERDÍA (medio turno persistido, usuario nunca contestado)."""
+    calls = {"n": 0}
+
+    async def flaky_ai(project, project_config, message, history):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("Claude timeout (transitorio)")
+        return "respuesta ok"
+
+    monkeypatch.setattr(convsvc, "get_ai_response", flaky_ai)
+
+    body = {
+        "entry": [{
+            "changes": [{
+                "field": "messages",
+                "value": {"messages": [{
+                    "id": "wamid_retry", "type": "text",
+                    "from": "5491100000000", "text": {"body": "me interesa"},
+                }]},
+            }],
+        }],
+    }
+
+    asyncio.run(webhook._process_event(body))   # 1ª entrega: Claude falla
+    asyncio.run(webhook._process_event(body))   # Meta REINTENTA el mismo wamid
+
+    db = database.SessionLocal()
+    try:
+        # El evento quedó reclamado tras el retry exitoso (idempotencia futura intacta).
+        assert db.query(models.ProcessedEvent).count() == 1
+        # Y el lead efectivamente recibió respuesta: existe el Message del asistente.
+        assert (
+            db.query(models.Message)
+            .filter(models.Message.role == "assistant", models.Message.content == "respuesta ok")
+            .count()
+            == 1
+        )
+    finally:
+        db.close()
+
+
+def test_instagram_transient_failure_releases_claim_so_retry_recovers(fresh_db, monkeypatch):
+    """Mismo contrato que WhatsApp pero por el canal de Instagram (_handle_ig_event)."""
+    calls = {"n": 0}
+
+    async def flaky_ai(project, project_config, message, history):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("Claude timeout (transitorio)")
+        return "respuesta ok"
+
+    monkeypatch.setattr(convsvc, "get_ai_response", flaky_ai)
+
+    body = {
+        "entry": [{
+            "messaging": [{
+                "sender": {"id": "ig_user_1"},
+                "message": {"mid": "mid_retry", "text": "hola"},
+            }],
+        }],
+    }
+
+    asyncio.run(webhook._process_event(body))   # 1ª entrega: Claude falla
+    asyncio.run(webhook._process_event(body))   # Meta REINTENTA el mismo mid
+
+    db = database.SessionLocal()
+    try:
+        assert db.query(models.ProcessedEvent).count() == 1
+        assert (
+            db.query(models.Message)
+            .filter(models.Message.role == "assistant", models.Message.content == "respuesta ok")
+            .count()
+            == 1
+        )
+    finally:
+        db.close()

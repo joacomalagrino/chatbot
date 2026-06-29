@@ -24,6 +24,17 @@ _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 _logging_configured = False
 _logging_lock = threading.Lock()
 
+# Logger propio para las señales de saturación/arranque (separado del root para que
+# `grep observability` en los logs de Railway aísle justo estas líneas de alta señal).
+_logger = logging.getLogger("observability")
+
+# Contador acumulado de saturaciones del pool de DB (QueuePool limit / pool timeout). Es la
+# señal #1 de que la app está al techo de concurrencia bajo carga. Acumulado por worker desde
+# el arranque (en memoria, se reinicia con el deploy); sirve para ver "esto está pasando MUCHO"
+# de un vistazo en /leads/errors sin tener que contar líneas de log.
+_pool_exhaustion_count = 0
+_pool_exhaustion_lock = threading.Lock()
+
 # El registro de errores se toca desde BackgroundTasks (event loop) y desde el endpoint del
 # panel (request). El deque de stdlib es thread-safe para append/iteración, pero protegemos
 # igual la lectura del snapshot con un lock para no exponer estados intermedios.
@@ -89,3 +100,57 @@ def clear_errors() -> None:
     """Vacía el anillo (sobre todo para aislamiento entre tests)."""
     with _errors_lock:
         _errors.clear()
+
+
+# ───────────────────── señales de saturación / arranque ─────────────────────
+
+
+def log_pool_exhaustion(exc: BaseException | None = None, **details) -> int:
+    """Loguea (WARN) y contabiliza una saturación del pool de DB.
+
+    Es la señal #1 de saturación: cuando entran muchos webhooks/usuarios a la vez y el
+    pool se queda sin conexiones, SQLAlchemy lanza un timeout ("QueuePool limit ... reached")
+    al pedir una conexión. Sin esta marca, el operador solo ve 5xx genéricos y no sabe que la
+    causa es el techo de concurrencia (subir DB_POOL_SIZE/DB_MAX_OVERFLOW).
+
+    Devuelve el contador acumulado tras incrementarlo (útil para el log y para tests). También
+    deja el evento en el anillo de errores recientes para que aparezca en /leads/errors.
+    """
+    global _pool_exhaustion_count
+    with _pool_exhaustion_lock:
+        _pool_exhaustion_count += 1
+        count = _pool_exhaustion_count
+    # WARN (no ERROR): es saturación/contrapresión, no necesariamente un bug; pero es la
+    # señal a vigilar bajo carga. El contador acumulado en el mensaje lo hace grep-eable.
+    _logger.warning(
+        "DB pool agotado (QueuePool limit reached / pool timeout) — saturación #%d%s",
+        count,
+        f" {details}" if details else "",
+    )
+    record_error("db.pool_exhausted", exc, count=count, **details)
+    return count
+
+
+def pool_exhaustion_count() -> int:
+    """Cuántas saturaciones del pool se contabilizaron desde el arranque (este worker)."""
+    with _pool_exhaustion_lock:
+        return _pool_exhaustion_count
+
+
+def reset_pool_exhaustion_count() -> None:
+    """Resetea el contador (aislamiento entre tests)."""
+    global _pool_exhaustion_count
+    with _pool_exhaustion_lock:
+        _pool_exhaustion_count = 0
+
+
+def log_startup_config(**config) -> None:
+    """Loguea (INFO) la config efectiva al arranque, en una sola línea estructurada.
+
+    Bajo carga, saber con qué pool/modo arrancó el proceso es clave para diagnosticar:
+    si aparecen saturaciones, el operador necesita ver de un vistazo el pool_size/overflow
+    efectivos (no los del .env, que pueden no haberse aplicado) sin abrir el código. Las
+    claves se ordenan para que la línea sea estable/diff-eable entre deploys.
+    """
+    rendered = " ".join(f"{k}={config[k]}" for k in sorted(config))
+    _logger.info("startup config efectiva — %s", rendered)

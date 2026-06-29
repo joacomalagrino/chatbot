@@ -2,6 +2,7 @@ import logging
 import os
 
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import OperationalError, TimeoutError as PoolTimeoutError
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from config import get_settings
 
@@ -56,7 +57,30 @@ class Base(DeclarativeBase):
     pass
 
 
+def is_pool_exhaustion(exc: BaseException) -> bool:
+    """¿Esta excepción es una saturación del pool de DB?
+
+    Cubre los dos modos que delatan el techo de concurrencia bajo carga:
+    - `sqlalchemy.exc.TimeoutError` ("QueuePool limit ... reached"): el pool no consiguió
+      una conexión libre dentro de `pool_timeout`. Es la señal #1 de saturación.
+    - `OperationalError` cuyo mensaje habla de conexiones/pool agotados (algunos drivers
+      reportan el agotamiento del lado servidor así, no como pool timeout de SQLAlchemy).
+
+    Detección por tipo + texto (no por instancia exacta) para no acoplarse a un driver.
+    """
+    if isinstance(exc, PoolTimeoutError):
+        return True
+    if isinstance(exc, OperationalError):
+        msg = str(exc).lower()
+        return "queuepool" in msg or "too many connections" in msg or "remaining connection slots" in msg
+    return False
+
+
 def get_db():
+    """Dependencia de sesión para los endpoints. Si el pool está saturado, la `TimeoutError`
+    de SQLAlchemy se lanza al ejecutar la primera query DENTRO del endpoint (el checkout es
+    lazy), no acá; por eso la detección de saturación vive en el middleware HTTP de main.py
+    (que ve la excepción propagándose) y no en este generador."""
     db = SessionLocal()
     try:
         yield db

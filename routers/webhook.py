@@ -36,6 +36,14 @@ DEFAULT_LEADFORM_PROJECT = "agencia"
 MAX_WEBHOOK_BYTES = 256 * 1024
 
 
+def _is_optout_message(text: str) -> bool:
+    """¿El inbound es un pedido de baja del re-engagement? Match exacto contra las palabras
+    configuradas (REENGAGE_OPTOUT_KEYWORDS), tras trim + case-insensitive. Exacto (no
+    substring) para no marcar baja por mensajes que solo mencionan la palabra
+    (ej. "no me des de baja todavía")."""
+    return (text or "").strip().casefold() in settings.optout_keywords()
+
+
 def _resolve_project(value: str, mapping: dict, default: str) -> str:
     """Resuelve el proyecto desde un mapping; cae al default y garantiza que exista."""
     project = mapping.get(value, default)
@@ -330,6 +338,13 @@ async def _handle_change(db: Session, change: dict):
             # igualar las columnas DateTime del modelo. Se persiste con el turno (record_turn
             # commitea) para que un envío proactivo posterior sepa si la ventana sigue abierta.
             conversation.last_inbound_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            # Opt-out de re-engagement: si el lead pide la baja (BAJA/STOP/CANCELAR…), marcarlo
+            # para que el selector proactivo no le vuelva a escribir. Additivo: NO corta el flujo
+            # —se sigue respondiendo este turno normalmente— y se persiste con el commit de
+            # record_turn (mismo turno, sin commit extra en el hot path).
+            if not conversation.reengage_opt_out and _is_optout_message(text):
+                conversation.reengage_opt_out = True
+                logger.info("Re-engagement opt-out registrado (conversation=%s)", conversation.id)
             # Si la persistencia del turno falla (timeout de Claude, hipo de DB —más probable
             # bajo ráfaga), liberar el evento reclamado para que el reintento de Meta (mismo
             # wamid) lo reprocese. Sin esto el claim queda quemado y el inbound se PIERDE:

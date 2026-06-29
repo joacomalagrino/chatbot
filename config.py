@@ -30,6 +30,16 @@ class Settings(BaseSettings):
     # Código de idioma de la plantilla (debe coincidir con el aprobado en Meta).
     whatsapp_reengage_template_lang: str = "es_AR"
 
+    # Re-engagement proactivo de leads fuera de la ventana de 24h (servicio reengage_service).
+    # SCAFFOLD apagado por DEFAULT y con doble gate: hasta que NO esté prendido el flag Y
+    # haya una plantilla aprobada cargada, el servicio es un NO-OP (no manda nada). Esto evita
+    # mandar free-form que Graph rechazaría y, sobre todo, mandar algo sin querer.
+    reengage_enabled: bool = Field(default=False, validation_alias="REENGAGE_ENABLED")
+    # Nombre EXACTO de la plantilla aprobada en Meta para el re-engagement proactivo. Vacío
+    # (default) => el servicio no manda nada. Si se deja vacío pero hay WHATSAPP_REENGAGE_TEMPLATE
+    # configurada, se reusa esa (un solo nombre de plantilla sirve para ambos usos).
+    reengage_template_name: str = Field(default="", validation_alias="REENGAGE_TEMPLATE_NAME")
+
     # Auth de endpoints internos (/leads, /ads). Sin esto, esos endpoints quedan cerrados.
     admin_api_key: str = ""
 
@@ -62,6 +72,21 @@ class Settings(BaseSettings):
             return ["*"]
         # Sin orígenes válidos en prod → fail-closed (no se permite ningún cross-origin).
         return [o.strip() for o in raw.split(",") if o.strip()]
+
+    def reengage_template(self) -> str:
+        """Plantilla efectiva para el re-engagement proactivo.
+
+        Prioriza REENGAGE_TEMPLATE_NAME; si está vacía, cae a WHATSAPP_REENGAGE_TEMPLATE
+        (la misma plantilla aprobada sirve para los dos usos). Vacío => sin plantilla, el
+        servicio no manda nada."""
+        return (self.reengage_template_name or self.whatsapp_reengage_template or "").strip()
+
+    def reengage_active(self) -> bool:
+        """¿El re-engagement proactivo está habilitado de punta a punta?
+
+        Doble gate: el flag prendido Y una plantilla aprobada cargada. Cualquiera de los
+        dos en falso => NO-OP seguro (el servicio no manda nada)."""
+        return bool(self.reengage_enabled) and bool(self.reengage_template())
 
     def wa_number_map(self) -> dict:
         return _parse_json_map(self.whatsapp_number_to_project)

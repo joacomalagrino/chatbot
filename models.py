@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey, JSON, Uuid, Index
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, JSON, Uuid, Index, Boolean
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 import uuid
@@ -30,6 +30,14 @@ class Conversation(Base):
     # Último inbound del usuario (para la ventana de 24h de WhatsApp): pasada esa ventana
     # Graph rechaza el free-form y hay que mandar una plantilla. Naive UTC como el resto.
     last_inbound_at = Column(DateTime)
+    # Cuándo se le mandó la plantilla de re-engagement proactivo (reengage_service). NULL =
+    # todavía no se re-enganchó. Sirve de idempotencia: el selector excluye los que ya tienen
+    # valor, así una segunda corrida no vuelve a mandar al mismo lead. Naive UTC.
+    reengaged_at = Column(DateTime)
+    # Opt-out: el lead pidió no recibir más mensajes. NULL/False = se le puede escribir; True =
+    # nunca se lo re-engancha. Previsto para cuando se cablee el opt-out (ej. "BAJA"); por ahora
+    # queda como gate respetado por el selector.
+    reengage_opt_out = Column(Boolean, default=False)
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 

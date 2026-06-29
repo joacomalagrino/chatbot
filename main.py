@@ -19,6 +19,7 @@ from services import meta_service
 from routers.ads import router as ads_router
 from routers.chat import router as chat_router
 from routers.leads import router as leads_router
+from routers.reengage import router as reengage_router
 from routers.webhook import router as webhook_router
 
 # Logging estructurado (timestamp/nivel/módulo, nivel por LOG_LEVEL) lo antes posible, para
@@ -148,6 +149,10 @@ app.include_router(
 )
 app.include_router(
     ads_router, prefix="/ads", tags=["ads"], dependencies=[Depends(require_admin)]
+)
+# /reengage: trigger del re-engagement proactivo. Interno: misma auth admin (fail-closed).
+app.include_router(
+    reengage_router, prefix="/reengage", tags=["reengage"], dependencies=[Depends(require_admin)]
 )
 
 app.mount("/widget", StaticFiles(directory="widget"), name="widget")

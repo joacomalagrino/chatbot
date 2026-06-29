@@ -273,13 +273,32 @@ async def _handle_ig_event(db: Session, event: dict):
     # Reclamar el evento DESPUÉS de validar que es procesable: si lo reclamáramos antes
     # y faltara el sender, un reintento válido de Meta quedaría descartado.
     mid = msg.get("mid")
-    if not _claim_event(db, f"ig_{mid}" if mid else ""):
+    event_id = f"ig_{mid}" if mid else ""
+    if not _claim_event(db, event_id):
         return
     project = _resolve_project("", {}, DEFAULT_INSTAGRAM_PROJECT)
     conversation = get_or_create_conversation(
         db, f"ig_{ig_id}", project, "instagram", contact_instagram=ig_id
     )
-    response_text = await record_turn(db, conversation, text)
+    # Si la persistencia del turno falla (p.ej. timeout de Claude, hipo de DB —más
+    # probable bajo ráfaga), liberamos el evento reclamado para que el reintento de Meta
+    # (mismo mid) lo vuelva a procesar. Sin esto el claim queda quemado y el inbound se
+    # PIERDE silenciosamente: medio turno persistido (user sin reply) y nunca contestado.
+    # El _deliver posterior NO libera: ahí el turno YA está persistido y reintentar
+    # duplicaría el turno; el fallo de envío se trata aparte (reintento fuera de banda).
+    #
+    # TRADE-OFF CONOCIDO (duplicación del Message de usuario): igual que en WhatsApp
+    # (_handle_change). record_turn commitea el Message del usuario ANTES del await a Claude,
+    # así que el db.rollback() de acá no lo revierte y el reintento de Meta inserta un Message
+    # de usuario idéntico → el inbound queda DUPLICADO (la respuesta del asistente se persiste
+    # una sola vez). Se acepta: mejor duplicar el mensaje del usuario que PERDER el lead.
+    # test_concurrency lo documenta (test_instagram_transient_failure_duplicates_user_message).
+    try:
+        response_text = await record_turn(db, conversation, text)
+    except Exception:
+        db.rollback()
+        _release_event(db, event_id)
+        raise
     await _deliver(send_instagram_message(ig_id, response_text), "instagram", conversation.id)
 
 
@@ -300,7 +319,8 @@ async def _handle_change(db: Session, change: dict):
             # Reclamar DESPUÉS de validar 'from': si reclamáramos antes y faltara,
             # un reintento válido de Meta (mismo wamid) quedaría descartado.
             wamid = msg.get("id")
-            if not _claim_event(db, f"wa_{wamid}" if wamid else ""):
+            event_id = f"wa_{wamid}" if wamid else ""
+            if not _claim_event(db, event_id):
                 continue
             project = _resolve_project(phone, settings.wa_number_map(), DEFAULT_WHATSAPP_PROJECT)
             conversation = get_or_create_conversation(
@@ -310,7 +330,28 @@ async def _handle_change(db: Session, change: dict):
             # igualar las columnas DateTime del modelo. Se persiste con el turno (record_turn
             # commitea) para que un envío proactivo posterior sepa si la ventana sigue abierta.
             conversation.last_inbound_at = datetime.now(timezone.utc).replace(tzinfo=None)
-            response_text = await record_turn(db, conversation, text)
+            # Si la persistencia del turno falla (timeout de Claude, hipo de DB —más probable
+            # bajo ráfaga), liberar el evento reclamado para que el reintento de Meta (mismo
+            # wamid) lo reprocese. Sin esto el claim queda quemado y el inbound se PIERDE:
+            # medio turno persistido (user sin reply) y el lead nunca contestado. El _deliver
+            # posterior NO libera (ahí el turno ya está persistido; reintentar lo duplicaría).
+            #
+            # TRADE-OFF CONOCIDO (duplicación del Message de usuario): record_turn commitea el
+            # Message del usuario ANTES del await a Claude (conversation_service.record_turn),
+            # así que cuando Claude falla ese mensaje YA está persistido y el db.rollback() de
+            # acá no lo revierte (fue otra transacción). El reintento de Meta vuelve a insertar
+            # un Message de usuario idéntico → el inbound queda DUPLICADO (la respuesta del
+            # asistente, en cambio, se persiste una sola vez, en el intento exitoso). Se acepta:
+            # mejor duplicar el mensaje del usuario que PERDER el lead. Deduplicarlo prolijamente
+            # exigiría un id externo (wamid) en Message —columna + migración + cambio de firma de
+            # record_turn—, fuera del alcance de este fix. test_concurrency lo documenta como
+            # comportamiento esperado (test_whatsapp_transient_failure_duplicates_user_message).
+            try:
+                response_text = await record_turn(db, conversation, text)
+            except Exception:
+                db.rollback()
+                _release_event(db, event_id)
+                raise
             # Ruteo por ventana: con el inbound recién registrado la ventana está abierta,
             # así que esta respuesta sale free-form. send_whatsapp_reply centraliza la
             # decisión (abierta → free-form / cerrada → plantilla) para los envíos proactivos.

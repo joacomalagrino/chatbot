@@ -101,6 +101,22 @@ def test_fallback_on_api_error_without_propagating(monkeypatch):
     assert _run() == claude_service.FALLBACK
 
 
+def test_api_error_se_registra_con_latencia(monkeypatch):
+    """Observabilidad: un fallo de Claude queda en el anillo de errores con latency_ms,
+    para verlo en /leads/errors (bajo carga, una racha de timeouts deja sin respuesta al lead)."""
+    import observability
+    observability.clear_errors()
+    req = httpx.Request("POST", "https://api.anthropic.com")
+    _patch_create(monkeypatch, raises=anthropic.APIConnectionError(message="timeout", request=req))
+    _run()
+    errs = observability.recent_errors()
+    rec = next(e for e in errs if e["context"] == "claude_service.create")
+    assert rec["details"]["project"] == "agencia"
+    assert "latency_ms" in rec["details"]
+    assert isinstance(rec["details"]["latency_ms"], int)
+    observability.clear_errors()
+
+
 def test_non_api_error_propagates(monkeypatch):
     # Una excepción que NO es anthropic.APIError no se atrapa: debe propagar.
     _patch_create(monkeypatch, raises=RuntimeError("bug inesperado"))

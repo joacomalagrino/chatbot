@@ -12,9 +12,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from config import PROJECTS, get_settings
-from database import SessionLocal
+from database import SessionLocal, is_pool_exhaustion
 from models import Conversation, Lead, ProcessedEvent
-from observability import record_error
+from observability import log_pool_exhaustion, record_error
 from services.conversation_service import get_or_create_conversation, record_turn
 from services.meta_service import (
     get_lead_data,
@@ -137,6 +137,12 @@ async def _process_event(body: dict):
             for change in entry.get("changes", [])
             if change.get("field")
         })
+        # Saturación del pool de DB: es la señal #1 de que la app está al techo bajo la
+        # ráfaga de webhooks. La marcamos aparte (WARN + contador) para que no se pierda
+        # entre los errores genéricos del registro; igual la dejamos en _process_event para
+        # saber qué evento se perdió.
+        if is_pool_exhaustion(exc):
+            log_pool_exhaustion(exc, where="webhook._process_event", fields=fields)
         logger.exception("Error procesando webhook Meta (fields=%s)", fields)
         record_error("webhook._process_event", exc, fields=fields)
     finally:

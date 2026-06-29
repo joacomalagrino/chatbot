@@ -1,8 +1,10 @@
 import logging
+import time
 
 import anthropic
 
 from config import get_settings
+from observability import record_error
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -46,6 +48,7 @@ async def get_ai_response(project: str, project_config: dict, message: str, hist
 
     messages = history[-20:] + [{"role": "user", "content": message}]
 
+    started = time.monotonic()
     try:
         response = await client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -53,8 +56,16 @@ async def get_ai_response(project: str, project_config: dict, message: str, hist
             system=system_prompt,
             messages=messages,
         )
-    except anthropic.APIError:
-        logger.exception("Error llamando a la API de Claude")
+    except anthropic.APIError as exc:
+        # Latencia hasta el fallo: distingue un timeout (≈20s, el límite del cliente) de un
+        # rechazo inmediato (rate limit / 5xx). Bajo carga, una racha de timeouts de Claude
+        # es por qué los leads dejan de recibir respuesta; queda en /leads/errors además del log.
+        latency_ms = round((time.monotonic() - started) * 1000)
+        logger.warning(
+            "Claude API falló (project=%s, latency_ms=%d): %s",
+            project, latency_ms, type(exc).__name__,
+        )
+        record_error("claude_service.create", exc, project=project, latency_ms=latency_ms)
         return FALLBACK
 
     # Acceso defensivo: tomar el primer bloque de texto, no asumir content[0].
@@ -73,6 +84,7 @@ async def stream_ai_response(project: str, project_config: dict, message: str, h
 
     messages = history[-20:] + [{"role": "user", "content": message}]
 
+    started = time.monotonic()
     try:
         async with client.messages.stream(
             model="claude-haiku-4-5-20251001",
@@ -82,6 +94,11 @@ async def stream_ai_response(project: str, project_config: dict, message: str, h
         ) as stream:
             async for delta in stream.text_stream:
                 yield delta
-    except anthropic.APIError:
-        logger.exception("Error en el streaming de la API de Claude")
+    except anthropic.APIError as exc:
+        latency_ms = round((time.monotonic() - started) * 1000)
+        logger.warning(
+            "Claude streaming falló (project=%s, latency_ms=%d): %s",
+            project, latency_ms, type(exc).__name__,
+        )
+        record_error("claude_service.stream", exc, project=project, latency_ms=latency_ms)
         yield FALLBACK

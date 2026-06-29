@@ -224,3 +224,94 @@ def test_errors_endpoint_muestra_errores_registrados(client, monkeypatch):
     data = r.json()
     assert data["count"] >= 1
     assert any(e["context"] == "webhook._process_event" for e in data["errors"])
+
+
+# ───────────────────── saturación del pool de DB (señal #1) ──────────────────
+
+from sqlalchemy.exc import OperationalError, TimeoutError as PoolTimeoutError
+
+import database
+
+
+def test_is_pool_exhaustion_detecta_queuepool_timeout():
+    """La TimeoutError de SQLAlchemy ("QueuePool limit ... reached") es saturación."""
+    exc = PoolTimeoutError("QueuePool limit of size 10 overflow 20 reached, connection timed out")
+    assert database.is_pool_exhaustion(exc) is True
+
+
+def test_is_pool_exhaustion_detecta_operationalerror_de_postgres():
+    """Postgres reporta el agotamiento del lado servidor por mensaje, no como pool timeout."""
+    exc = OperationalError("SELECT 1", {}, Exception("FATAL: remaining connection slots are reserved"))
+    assert database.is_pool_exhaustion(exc) is True
+    exc2 = OperationalError("SELECT 1", {}, Exception("FATAL: sorry, too many connections"))
+    assert database.is_pool_exhaustion(exc2) is True
+
+
+def test_is_pool_exhaustion_ignora_otros_errores():
+    """No confundir un error de negocio con saturación: cualquier otra cosa es False."""
+    assert database.is_pool_exhaustion(ValueError("nada que ver")) is False
+    assert database.is_pool_exhaustion(OperationalError("x", {}, Exception("syntax error"))) is False
+
+
+def test_log_pool_exhaustion_cuenta_loguea_y_registra(caplog):
+    """Contabiliza, loguea WARN y deja el evento en el anillo de errores recientes."""
+    observability.reset_pool_exhaustion_count()
+    observability.clear_errors()
+    exc = PoolTimeoutError("QueuePool limit reached")
+    with caplog.at_level(logging.WARNING):
+        n1 = observability.log_pool_exhaustion(exc, where="test")
+        n2 = observability.log_pool_exhaustion(exc, where="test")
+
+    assert (n1, n2) == (1, 2)
+    assert observability.pool_exhaustion_count() == 2
+    assert any("DB pool agotado" in rec.message for rec in caplog.records)
+    errs = observability.recent_errors()
+    pool_errs = [e for e in errs if e["context"] == "db.pool_exhausted"]
+    assert len(pool_errs) == 2
+    assert pool_errs[0]["details"]["count"] == 2  # más nuevo primero
+    observability.reset_pool_exhaustion_count()
+
+
+def test_middleware_registra_saturacion_del_pool(monkeypatch):
+    """Si un endpoint muere por saturación del pool, el middleware lo deja en /leads/errors
+    SIN cambiar la respuesta (sigue siendo el 5xx de siempre)."""
+    observability.reset_pool_exhaustion_count()
+    observability.clear_errors()
+
+    # Forzar que la query de /leads/stats lance el pool timeout.
+    import routers.leads as leads_router
+    monkeypatch.setattr(leads_router, "func", _BoomFunc())
+
+    # raise_server_exceptions=False para observar la respuesta 500 real (en vez de que el
+    # TestClient re-lance la excepción del server, que es su default).
+    with TestClient(main.app, raise_server_exceptions=False) as c:
+        r = c.get("/leads/stats", headers=ADMIN)
+
+    # Cero cambio de comportamiento: la respuesta sigue siendo 500 (no la tragamos).
+    assert r.status_code == 500
+    assert observability.pool_exhaustion_count() == 1
+    assert any(e["context"] == "db.pool_exhausted" for e in observability.recent_errors())
+    observability.reset_pool_exhaustion_count()
+
+
+class _BoomFunc:
+    """Stub de sqlalchemy.func: cualquier atributo lanza el pool timeout al invocarse,
+    simulando que la query de /leads/stats muere por saturación del pool."""
+
+    def __getattr__(self, _name):
+        def _raise(*a, **k):
+            raise PoolTimeoutError("QueuePool limit of size 10 overflow 20 reached")
+        return _raise
+
+
+# ───────────────────── log de config efectiva al arranque ───────────────────
+
+def test_log_startup_config_emite_una_linea_estructurada(caplog):
+    with caplog.at_level(logging.INFO, logger="observability"):
+        observability.log_startup_config(pool_size=10, max_overflow=20, db_io="sync")
+    line = next(r.message for r in caplog.records if "startup config" in r.message)
+    # Claves ordenadas y presentes (línea estable/diff-eable entre deploys).
+    assert "db_io=sync" in line
+    assert "max_overflow=20" in line
+    assert "pool_size=10" in line
+    assert line.index("db_io") < line.index("max_overflow") < line.index("pool_size")

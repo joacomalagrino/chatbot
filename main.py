@@ -12,8 +12,8 @@ from sqlalchemy import text
 
 from auth import require_admin
 from config import get_settings
-from database import engine, init_db
-from observability import configure_logging
+from database import engine, init_db, is_pool_exhaustion
+from observability import configure_logging, log_pool_exhaustion, log_startup_config
 from ratelimit import limiter
 from services import meta_service
 from routers.ads import router as ads_router
@@ -29,8 +29,38 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+def _effective_pool_config() -> dict:
+    """Lee la config EFECTIVA del pool desde el engine ya construido (no del .env, que puede
+    no haberse aplicado). Defensivo: un pool no-QueuePool (p.ej. SQLite en dev) no expone
+    todos los atributos, así que cada lectura cae a None si no está."""
+    pool = engine.pool
+
+    def _safe(attr):
+        val = getattr(pool, attr, None)
+        try:
+            return val() if callable(val) else val
+        except Exception:
+            return None
+
+    return {
+        "backend": engine.url.get_backend_name(),
+        "driver": engine.dialect.driver,
+        "pool_class": type(pool).__name__,
+        "pool_size": _safe("size"),
+        "max_overflow": getattr(pool, "_max_overflow", None),
+        "pool_timeout": _safe("timeout"),
+        # El stack es sync (SQLAlchemy sync + psycopg2); Claude y Meta sí son async (httpx).
+        # Dejarlo explícito evita confusión al diagnosticar saturación del pool.
+        "db_io": "sync",
+    }
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Config efectiva al arranque: con qué pool/modo levantó el proceso. Si después aparecen
+    # saturaciones del pool, el operador ve de un vistazo el size/overflow reales sin abrir el
+    # código ni adivinar si el .env se aplicó.
+    log_startup_config(**_effective_pool_config())
     try:
         init_db()
     except Exception:
@@ -77,6 +107,23 @@ _ADMIN_CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self'; "
     "img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'"
 )
+
+
+@app.middleware("http")
+async def pool_exhaustion_observer(request: Request, call_next):
+    """Deja rastro WARN cuando un request muere por saturación del pool de DB.
+
+    El checkout del pool es lazy: la `TimeoutError` ("QueuePool limit ... reached") se lanza
+    DENTRO del endpoint al correr la primera query, y se propaga hasta acá. La detectamos,
+    la logueamos/contabilizamos (señal #1 de saturación bajo carga) y la RE-LANZAMOS sin
+    tocarla: el manejo de la respuesta (5xx) queda igual que antes. Cero cambio de
+    comportamiento; solo visibilidad."""
+    try:
+        return await call_next(request)
+    except Exception as exc:
+        if is_pool_exhaustion(exc):
+            log_pool_exhaustion(exc, path=request.url.path, method=request.method)
+        raise
 
 
 @app.middleware("http")

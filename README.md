@@ -5,7 +5,7 @@ Atiende un widget web, WhatsApp e Instagram (Meta directa) y Lead Ads, conversa 
 Claude, detecta datos de contacto y los guarda como leads. Incluye un panel de
 administración para ver leads, métricas y generar variantes de anuncios.
 
-Backend en **FastAPI**. Aún no está deployado.
+Backend en **FastAPI**, deployado en Railway (auto-deploy desde `origin/main`). Ver "Deploy (Railway)" más abajo.
 
 ## Proyectos soportados
 

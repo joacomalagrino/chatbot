@@ -280,6 +280,13 @@ async def _handle_ig_event(db: Session, event: dict):
     # PIERDE silenciosamente: medio turno persistido (user sin reply) y nunca contestado.
     # El _deliver posterior NO libera: ahí el turno YA está persistido y reintentar
     # duplicaría el turno; el fallo de envío se trata aparte (reintento fuera de banda).
+    #
+    # TRADE-OFF CONOCIDO (duplicación del Message de usuario): igual que en WhatsApp
+    # (_handle_change). record_turn commitea el Message del usuario ANTES del await a Claude,
+    # así que el db.rollback() de acá no lo revierte y el reintento de Meta inserta un Message
+    # de usuario idéntico → el inbound queda DUPLICADO (la respuesta del asistente se persiste
+    # una sola vez). Se acepta: mejor duplicar el mensaje del usuario que PERDER el lead.
+    # test_concurrency lo documenta (test_instagram_transient_failure_duplicates_user_message).
     try:
         response_text = await record_turn(db, conversation, text)
     except Exception:
@@ -322,6 +329,17 @@ async def _handle_change(db: Session, change: dict):
             # wamid) lo reprocese. Sin esto el claim queda quemado y el inbound se PIERDE:
             # medio turno persistido (user sin reply) y el lead nunca contestado. El _deliver
             # posterior NO libera (ahí el turno ya está persistido; reintentar lo duplicaría).
+            #
+            # TRADE-OFF CONOCIDO (duplicación del Message de usuario): record_turn commitea el
+            # Message del usuario ANTES del await a Claude (conversation_service.record_turn),
+            # así que cuando Claude falla ese mensaje YA está persistido y el db.rollback() de
+            # acá no lo revierte (fue otra transacción). El reintento de Meta vuelve a insertar
+            # un Message de usuario idéntico → el inbound queda DUPLICADO (la respuesta del
+            # asistente, en cambio, se persiste una sola vez, en el intento exitoso). Se acepta:
+            # mejor duplicar el mensaje del usuario que PERDER el lead. Deduplicarlo prolijamente
+            # exigiría un id externo (wamid) en Message —columna + migración + cambio de firma de
+            # record_turn—, fuera del alcance de este fix. test_concurrency lo documenta como
+            # comportamiento esperado (test_whatsapp_transient_failure_duplicates_user_message).
             try:
                 response_text = await record_turn(db, conversation, text)
             except Exception:

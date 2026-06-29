@@ -40,6 +40,13 @@ if not _db_url.startswith("sqlite"):
         pool_size=_int_env("DB_POOL_SIZE", 10),
         max_overflow=_int_env("DB_MAX_OVERFLOW", 20),
         pool_timeout=_int_env("DB_POOL_TIMEOUT", 30),
+        # connect_timeout: cota el TCP-connect a Postgres. Sin esto, si la DB está
+        # inalcanzable (host caído / red black-hole, no un "connection refused
+        # inmediato"), abrir una conexión nueva bloquea al default del SO (~2 min),
+        # colgando al worker bajo carga. Con la cota, una DB lenta/caída DEGRADA
+        # (falla rápido y el request da 5xx) en vez de quedar colgado. psycopg2 lo
+        # toma vía connect_args. Tunable por entorno como el resto del pool.
+        connect_args={"connect_timeout": _int_env("DB_CONNECT_TIMEOUT", 10)},
     )
 engine = create_engine(_db_url, **_engine_kwargs)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

@@ -43,6 +43,11 @@ def create_tables():
 # creamos explícitamente de forma idempotente. Nombres = convención de SQLAlchemy.
 _INDEXES = [
     "CREATE INDEX IF NOT EXISTS ix_messages_conversation_id ON messages (conversation_id)",
+    # Historial por turno: filtra por conversation_id y ordena por created_at DESC.
+    # El índice compuesto cubre filtro + orden de una (evita el sort en memoria del
+    # ORDER BY ... LIMIT cuando una conversación de WhatsApp acumula muchos mensajes).
+    "CREATE INDEX IF NOT EXISTS ix_messages_conversation_created "
+    "ON messages (conversation_id, created_at)",
     "CREATE INDEX IF NOT EXISTS ix_leads_project ON leads (project)",
     "CREATE INDEX IF NOT EXISTS ix_leads_status ON leads (status)",
     "CREATE INDEX IF NOT EXISTS ix_leads_created_at ON leads (created_at)",

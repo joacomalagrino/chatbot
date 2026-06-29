@@ -21,7 +21,9 @@ import database
 import models
 import routers.webhook as webhook
 import services.conversation_service as convsvc
+import services.lead_service as lead_service
 from services.conversation_service import get_or_create_conversation
+from services.lead_service import update_lead_from_message
 
 
 @pytest.fixture()
@@ -254,5 +256,50 @@ def test_instagram_transient_failure_releases_claim_so_retry_recovers(fresh_db, 
             .count()
             == 1
         )
+    finally:
+        db.close()
+
+
+def test_concurrent_lead_creation_same_conversation_is_handled(fresh_db, monkeypatch):
+    """Dos turnos casi simultáneos de la MISMA conversación, cada uno detectando un dato de
+    contacto distinto: ambos ven conversation.lead is None y crean Lead(conversation_id=...).
+    leads.conversation_id es UNIQUE → el commit perdedor choca con IntegrityError. El handler
+    debe reconciliar (releer el Lead ganador y reaplicar) en vez de tirar el merge / 500.
+
+    Verifica: sin errores, exactamente 1 Lead, y AMBOS datos de contacto mergeados (no se
+    pierde el del turno perdedor)."""
+    monkeypatch.setattr(lead_service, "fire_hot_lead", lambda s: None)
+
+    # Conversación creada una sola vez (la race que probamos es la del Lead, no la conv).
+    setup = database.SessionLocal()
+    conv = get_or_create_conversation(setup, "wa_leadrace", "agencia", "whatsapp", contact_phone=None)
+    conv_id = conv.id
+    setup.close()
+
+    messages = {
+        0: "mi mail es persona@ejemplo.com",
+        1: "mi tel es 1123456780",
+    }
+
+    def worker(i, barrier):
+        db = database.SessionLocal()
+        try:
+            c = db.get(models.Conversation, conv_id)
+            barrier.wait()
+            update_lead_from_message(db, c, messages[i])
+        finally:
+            db.close()
+
+    errors = _run_threads(worker, 2)
+    assert errors == [], errors
+
+    db = database.SessionLocal()
+    try:
+        leads = db.query(models.Lead).filter_by(conversation_id=conv_id).all()
+        assert len(leads) == 1, "la UNIQUE constraint debe dejar una sola fila"
+        lead = leads[0]
+        # El merge de ambos turnos sobrevive: ni el email ni el teléfono se perdieron.
+        assert lead.email == "persona@ejemplo.com"
+        assert lead.phone == "1123456780"
     finally:
         db.close()

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey, JSON, Uuid
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, JSON, Uuid, Index
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 import uuid
@@ -39,6 +39,14 @@ class Conversation(Base):
 
 class Message(Base):
     __tablename__ = "messages"
+
+    # Índice compuesto (conversation_id, created_at): el historial por turno filtra por
+    # conversation_id y ordena por created_at DESC con LIMIT. El compuesto cubre filtro +
+    # orden de una, evitando el sort en memoria cuando una conversación de WhatsApp acumula
+    # muchos mensajes. El index=True de conversation_id queda para los lookups simples.
+    __table_args__ = (
+        Index("ix_messages_conversation_created", "conversation_id", "created_at"),
+    )
 
     id = Column(Uuid, primary_key=True, default=uuid.uuid4)
     conversation_id = Column(Uuid, ForeignKey("conversations.id"), nullable=False, index=True)

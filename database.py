@@ -9,13 +9,45 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 _db_url = settings.database_url.replace("postgres://", "postgresql://", 1)
+
+
+def _int_env(name: str, default: int) -> int:
+    """Lee un entero de entorno; ante valor ausente o inválido cae al default
+    (no rompe el arranque por una env mal cargada)."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("%s inválido (%r); usando default %d", name, raw, default)
+        return default
+
+
 # pool_pre_ping: valida la conexión antes de usarla (Railway cierra conexiones idle).
 # pool_recycle: recicla conexiones más viejas que 30 min antes de que el server las corte.
 _engine_kwargs = {"pool_pre_ping": True, "pool_recycle": 1800}
 # Dimensionar el pool para ráfagas (webhooks concurrentes + panel). SQLite usa otro
 # pool que no acepta estos kwargs, así que solo se aplican en Postgres.
+#
+# Tunables por entorno (sin redeploy de código) para ráfagas de campaña: cada request
+# toma una conexión del pool mientras corre su sección de DB, así que el techo de
+# concurrencia efectiva ≈ pool_size + max_overflow. Si bajo carga aparecen timeouts
+# "QueuePool limit ... reached", subir DB_POOL_SIZE / DB_MAX_OVERFLOW (sin pasarse del
+# max_connections del Postgres) o DB_POOL_TIMEOUT.
 if not _db_url.startswith("sqlite"):
-    _engine_kwargs.update(pool_size=10, max_overflow=20, pool_timeout=30)
+    _engine_kwargs.update(
+        pool_size=_int_env("DB_POOL_SIZE", 10),
+        max_overflow=_int_env("DB_MAX_OVERFLOW", 20),
+        pool_timeout=_int_env("DB_POOL_TIMEOUT", 30),
+        # connect_timeout: cota el TCP-connect a Postgres. Sin esto, si la DB está
+        # inalcanzable (host caído / red black-hole, no un "connection refused
+        # inmediato"), abrir una conexión nueva bloquea al default del SO (~2 min),
+        # colgando al worker bajo carga. Con la cota, una DB lenta/caída DEGRADA
+        # (falla rápido y el request da 5xx) en vez de quedar colgado. psycopg2 lo
+        # toma vía connect_args. Tunable por entorno como el resto del pool.
+        connect_args={"connect_timeout": _int_env("DB_CONNECT_TIMEOUT", 10)},
+    )
 engine = create_engine(_db_url, **_engine_kwargs)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -43,6 +75,11 @@ def create_tables():
 # creamos explícitamente de forma idempotente. Nombres = convención de SQLAlchemy.
 _INDEXES = [
     "CREATE INDEX IF NOT EXISTS ix_messages_conversation_id ON messages (conversation_id)",
+    # Historial por turno: filtra por conversation_id y ordena por created_at DESC.
+    # El índice compuesto cubre filtro + orden de una (evita el sort en memoria del
+    # ORDER BY ... LIMIT cuando una conversación de WhatsApp acumula muchos mensajes).
+    "CREATE INDEX IF NOT EXISTS ix_messages_conversation_created "
+    "ON messages (conversation_id, created_at)",
     "CREATE INDEX IF NOT EXISTS ix_leads_project ON leads (project)",
     "CREATE INDEX IF NOT EXISTS ix_leads_status ON leads (status)",
     "CREATE INDEX IF NOT EXISTS ix_leads_created_at ON leads (created_at)",

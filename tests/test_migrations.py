@@ -7,6 +7,8 @@ Verifican que la baseline:
 - y no tiene drift contra los modelos (si alguien cambia un modelo sin generar la
   migración correspondiente, este test falla).
 """
+import logging
+
 import sqlalchemy as sa
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
@@ -14,6 +16,7 @@ from alembic.script import ScriptDirectory
 
 import database
 import models
+import observability
 from database import SessionLocal
 
 APP_TABLES = {"conversations", "messages", "leads", "processed_events"}
@@ -95,3 +98,35 @@ def test_no_drift_baseline_matches_models():
         ctx = MigrationContext.configure(conn)
         diff = compare_metadata(ctx, models.Base.metadata)
     assert diff == [], f"Drift entre modelos y migraciones: {diff}"
+
+
+def test_alembic_failure_falls_back_and_alarms(monkeypatch, caplog):
+    """Si Alembic falla en el arranque, init_db debe:
+    - seguir arrancando (crear el schema con create_all), y
+    - NO hacerlo en silencio: alarmar fuerte (log CRITICAL) y registrar el
+      fallback en observability para no quedar ciegos ante un schema desincronizado.
+    """
+    _reset_db()
+    observability.clear_errors()
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("alembic tooling roto")
+
+    # Forzar que la rama de Alembic explote (sin tocar la DB real).
+    monkeypatch.setattr(database, "_alembic_config", _boom)
+
+    with caplog.at_level(logging.CRITICAL, logger="database"):
+        database.init_db()  # NO debe propagar: la app arranca igual
+
+    # Arrancó igual: el schema quedó creado por el fallback create_all.
+    assert APP_TABLES <= _table_names()
+
+    # Alarmó fuerte: hay un log CRITICAL mencionando el fallback.
+    critical_msgs = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert any("create_all" in r.getMessage() for r in critical_msgs), (
+        "Se esperaba un log CRITICAL avisando del fallback a create_all"
+    )
+
+    # Quedó registrado en observability para verlo desde el panel.
+    contexts = [e["context"] for e in observability.recent_errors()]
+    assert "database.init_db.alembic_fallback" in contexts

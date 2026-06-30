@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     # Ruteo opcional (JSON). Ej: {"541165613300": "mesa"} y {"123456": "agencia"}.
     whatsapp_number_to_project: str = ""
     lead_form_to_project: str = ""
+    # Ruteo de DMs de Instagram por cuenta receptora (recipient.id del webhook).
+    # Ej: {"17841400000000000": "mesa"}. Vacío = todos al proyecto default.
+    instagram_account_to_project: str = ""
 
     def origins_list(self) -> list[str]:
         # En desarrollo abrimos CORS para probar el widget desde cualquier localhost/puerto.
@@ -68,6 +71,9 @@ class Settings(BaseSettings):
 
     def lead_form_map(self) -> dict:
         return _parse_json_map(self.lead_form_to_project)
+
+    def ig_account_map(self) -> dict:
+        return _parse_json_map(self.instagram_account_to_project)
 
 
 def _parse_json_map(raw: str) -> dict:

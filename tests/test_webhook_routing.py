@@ -194,6 +194,77 @@ def test_handle_change_ignores_unknown_field(fresh_db):
     assert _counts() == {"conversations": 0, "messages": 0, "leads": 0, "events": 0}
 
 
+# ───────────────────────── _handle_ig_event: ruteo por cuenta ──────────────
+
+def _ig_event(ig_id, recipient_id, text="hola", mid="m1"):
+    return {
+        "sender": {"id": ig_id},
+        "recipient": {"id": recipient_id},
+        "message": {"mid": mid, "text": text},
+    }
+
+
+def test_handle_ig_event_routes_to_default_without_config(fresh_db, monkeypatch):
+    """Sin INSTAGRAM_ACCOUNT_TO_PROJECT, el DM cae al proyecto default."""
+    sent = []
+
+    async def capture(ig_id, text, *a, **k):
+        sent.append((ig_id, text))
+
+    monkeypatch.setattr(webhook, "send_instagram_message", capture)
+    monkeypatch.setattr(type(webhook.settings), "ig_account_map", lambda self: {})
+
+    db = database.SessionLocal()
+    try:
+        asyncio.run(webhook._handle_ig_event(db, _ig_event("USER1", "ACCT_X")))
+        conv = db.query(models.Conversation).filter_by(session_id="ig_USER1").first()
+        assert conv is not None
+        assert conv.project == webhook.DEFAULT_INSTAGRAM_PROJECT
+    finally:
+        db.close()
+    assert sent == [("USER1", "respuesta")]
+
+
+def test_handle_ig_event_routes_by_recipient_account(fresh_db, monkeypatch):
+    """Con config, el recipient.id mapea al proyecto de esa cuenta."""
+    async def capture(ig_id, text, *a, **k):
+        pass
+
+    monkeypatch.setattr(webhook, "send_instagram_message", capture)
+    monkeypatch.setattr(
+        type(webhook.settings), "ig_account_map", lambda self: {"ACCT_MESA": "mesa"}
+    )
+
+    db = database.SessionLocal()
+    try:
+        asyncio.run(webhook._handle_ig_event(db, _ig_event("USER2", "ACCT_MESA")))
+        conv = db.query(models.Conversation).filter_by(session_id="ig_USER2").first()
+        assert conv is not None
+        assert conv.project == "mesa"
+    finally:
+        db.close()
+
+
+def test_handle_ig_event_unmapped_account_falls_to_default(fresh_db, monkeypatch):
+    """Una cuenta no presente en el mapping cae al default."""
+    async def capture(ig_id, text, *a, **k):
+        pass
+
+    monkeypatch.setattr(webhook, "send_instagram_message", capture)
+    monkeypatch.setattr(
+        type(webhook.settings), "ig_account_map", lambda self: {"ACCT_MESA": "mesa"}
+    )
+
+    db = database.SessionLocal()
+    try:
+        asyncio.run(webhook._handle_ig_event(db, _ig_event("USER3", "ACCT_OTRA")))
+        conv = db.query(models.Conversation).filter_by(session_id="ig_USER3").first()
+        assert conv is not None
+        assert conv.project == webhook.DEFAULT_INSTAGRAM_PROJECT
+    finally:
+        db.close()
+
+
 # ───────────────────────── _handle_lead_ad ─────────────────────────────────
 
 def test_handle_lead_ad_fetches_claims_and_persists_lead(fresh_db, monkeypatch):

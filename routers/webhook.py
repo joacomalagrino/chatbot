@@ -280,7 +280,13 @@ async def _handle_ig_event(db: Session, event: dict):
     mid = msg.get("mid")
     if not _claim_event(db, f"ig_{mid}" if mid else ""):
         return
-    project = _resolve_project("", {}, DEFAULT_INSTAGRAM_PROJECT)
+    # Ruteo por cuenta: recipient.id es la cuenta de IG que recibió el DM. Si hay
+    # config (INSTAGRAM_ACCOUNT_TO_PROJECT), mapeamos a su proyecto; si no, cae al
+    # default (mismo comportamiento previo, pero con el hook ya cableado).
+    recipient_id = event.get("recipient", {}).get("id", "")
+    project = _resolve_project(
+        recipient_id, settings.ig_account_map(), DEFAULT_INSTAGRAM_PROJECT
+    )
     conversation = get_or_create_conversation(
         db, f"ig_{ig_id}", project, "instagram", contact_instagram=ig_id
     )

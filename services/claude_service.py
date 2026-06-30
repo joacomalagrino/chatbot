@@ -41,10 +41,31 @@ def _build_system_prompt(project_config: dict) -> str:
     )
 
 
+def _normalize_messages(messages: list) -> list:
+    """Colapsa turnos consecutivos del mismo rol antes de mandar a Claude.
+
+    Dos mensajes seguidos del mismo rol (p.ej. dos 'user' por un doble envío de
+    WhatsApp, o un 'assistant' duplicado) degradan la conversación: la API los
+    combina, pero el resultado queda implícito y desalineado con la alternancia
+    user/assistant que el modelo espera. Acá los unimos explícitamente en un solo
+    turno (concatenando el texto con un salto de línea) y descartamos los vacíos.
+    """
+    normalized: list = []
+    for msg in messages:
+        content = msg.get("content")
+        if not content:
+            continue
+        if normalized and normalized[-1]["role"] == msg["role"]:
+            normalized[-1]["content"] = f"{normalized[-1]['content']}\n{content}"
+        else:
+            normalized.append({"role": msg["role"], "content": content})
+    return normalized
+
+
 async def get_ai_response(project: str, project_config: dict, message: str, history: list) -> str:
     system_prompt = _build_system_prompt(project_config)
 
-    messages = history[-20:] + [{"role": "user", "content": message}]
+    messages = _normalize_messages(history[-20:] + [{"role": "user", "content": message}])
 
     try:
         response = await client.messages.create(
@@ -71,7 +92,7 @@ async def stream_ai_response(project: str, project_config: dict, message: str, h
     fallback no-streaming de /chat)."""
     system_prompt = _build_system_prompt(project_config)
 
-    messages = history[-20:] + [{"role": "user", "content": message}]
+    messages = _normalize_messages(history[-20:] + [{"role": "user", "content": message}])
 
     try:
         async with client.messages.stream(

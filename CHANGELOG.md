@@ -12,6 +12,28 @@ y el proyecto adhiere (con criterio flexible) a [Versionado Semántico](https://
 
 ### Added
 
+- **Re-engagement proactivo de leads fuera de la ventana de 24h (scaffold, apagado por
+  default).** Servicio (`services/reengage_service.py`) que barre los leads de WhatsApp
+  cuya ventana de 24h ya cerró (o está por cerrar, configurable) y les manda una plantilla
+  aprobada para reactivarlos, sin esperar un mensaje disparador:
+  - `find_reengageable_conversations()` selecciona los elegibles: canal WhatsApp con
+    teléfono, ventana cerrada (reusa `is_within_24h_window`), `reengaged_at IS NULL`
+    (idempotencia) y sin opt-out.
+  - `run_reengagement()` manda la plantilla y marca `reengaged_at` solo tras el envío OK;
+    una segunda corrida no re-manda a los ya marcados. Un fallo de envío no frena el batch
+    ni marca el lead.
+  - **Doble gate, NO-OP seguro:** con `REENGAGE_ENABLED=0` (default) **o** sin plantilla
+    (`REENGAGE_TEMPLATE_NAME`, fallback a `WHATSAPP_REENGAGE_TEMPLATE`) no manda nada.
+  - Columnas `conversations.reengaged_at` y `conversations.reengage_opt_out` (migración
+    `0003_reengaged_at`, opt-out previsto para cablear).
+  - **Trigger:** el repo no tiene scheduler, así que se expone `POST /reengage/run` con la
+    misma auth admin que `/leads`/`/ads`, para cablear a un cron externo (cadencia sugerida:
+    cada hora). Ver README → "Re-engagement proactivo".
+
+  **Acción del usuario:** crear y aprobar la plantilla en Meta, setear
+  `REENGAGE_TEMPLATE_NAME` y prender `REENGAGE_ENABLED=1`. +13 tests (gating, selección,
+  envío, idempotencia, opt-out, ventana, endpoint; Meta mockeado).
+
 - **Ventana de 24h de WhatsApp + plantillas de re-engagement.** WhatsApp solo acepta
   mensajes free-form (`type:text`) dentro de las 24h posteriores al último inbound del
   usuario; pasada esa ventana Graph los rechaza y el lead se perdía. Ahora:

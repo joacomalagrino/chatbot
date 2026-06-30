@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey, JSON, Uuid
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, JSON, Uuid, Index, Boolean
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 import uuid
@@ -30,6 +30,14 @@ class Conversation(Base):
     # Último inbound del usuario (para la ventana de 24h de WhatsApp): pasada esa ventana
     # Graph rechaza el free-form y hay que mandar una plantilla. Naive UTC como el resto.
     last_inbound_at = Column(DateTime)
+    # Cuándo se le mandó la plantilla de re-engagement proactivo (reengage_service). NULL =
+    # todavía no se re-enganchó. Sirve de idempotencia: el selector excluye los que ya tienen
+    # valor, así una segunda corrida no vuelve a mandar al mismo lead. Naive UTC.
+    reengaged_at = Column(DateTime)
+    # Opt-out: el lead pidió no recibir más mensajes. NULL/False = se le puede escribir; True =
+    # nunca se lo re-engancha. Previsto para cuando se cablee el opt-out (ej. "BAJA"); por ahora
+    # queda como gate respetado por el selector.
+    reengage_opt_out = Column(Boolean, default=False)
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
@@ -39,6 +47,14 @@ class Conversation(Base):
 
 class Message(Base):
     __tablename__ = "messages"
+
+    # Índice compuesto (conversation_id, created_at): el historial por turno filtra por
+    # conversation_id y ordena por created_at DESC con LIMIT. El compuesto cubre filtro +
+    # orden de una, evitando el sort en memoria cuando una conversación de WhatsApp acumula
+    # muchos mensajes. El index=True de conversation_id queda para los lookups simples.
+    __table_args__ = (
+        Index("ix_messages_conversation_created", "conversation_id", "created_at"),
+    )
 
     id = Column(Uuid, primary_key=True, default=uuid.uuid4)
     conversation_id = Column(Uuid, ForeignKey("conversations.id"), nullable=False, index=True)

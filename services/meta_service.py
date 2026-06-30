@@ -2,6 +2,7 @@ import asyncio
 import email.utils
 import logging
 import re
+import time
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -108,6 +109,7 @@ async def _request_with_retry(
     Soporta GET y POST (y cualquier método que acepte httpx.AsyncClient.request).
     """
     client = _get_client()
+    started = time.monotonic()
     for i in range(attempts):
         last = i == attempts - 1
         try:
@@ -120,10 +122,19 @@ async def _request_with_retry(
             )
         except (httpx.TransportError, httpx.TimeoutException) as exc:
             if last:
-                logger.exception("Meta %s falló por red/timeout en %s", method.upper(), url)
-                # Fetch a Graph agotado (red/timeout): registrar para el panel. `url` lleva
-                # solo el id de Graph en el path (numérico), sin PII del lead.
-                record_error("meta_service.request", exc, method=method.upper(), url=url)
+                # Latencia total acumulada (todos los intentos + backoffs): bajo carga un
+                # Graph lento/colgado es por qué la respuesta nunca llega al lead; la latencia
+                # distingue un timeout real de un connection-refused inmediato. `url` lleva
+                # solo el id de Graph (numérico), sin PII del lead.
+                latency_ms = round((time.monotonic() - started) * 1000)
+                logger.warning(
+                    "Meta %s agotó %d intentos por red/timeout en %s (latency_ms=%d)",
+                    method.upper(), attempts, url, latency_ms,
+                )
+                record_error(
+                    "meta_service.request", exc,
+                    method=method.upper(), url=url, attempts=attempts, latency_ms=latency_ms,
+                )
                 raise
             await asyncio.sleep(_backoff_delay(i))
             continue

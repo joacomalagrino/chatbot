@@ -5,7 +5,7 @@ Atiende un widget web, WhatsApp e Instagram (Meta directa) y Lead Ads, conversa 
 Claude, detecta datos de contacto y los guarda como leads. Incluye un panel de
 administración para ver leads, métricas y generar variantes de anuncios.
 
-Backend en **FastAPI**. Aún no está deployado.
+Backend en **FastAPI**, deployado en Railway (auto-deploy desde `origin/main`). Ver "Deploy (Railway)" más abajo.
 
 ## Proyectos soportados
 
@@ -60,6 +60,8 @@ Copiá `.env.example` a `.env` y completá las variables. Las más importantes:
 | `META_WHATSAPP_PHONE_ID`, `META_INSTAGRAM_ACCOUNT_ID` | IDs de los canales de Meta. |
 | `WHATSAPP_REENGAGE_TEMPLATE` | Nombre EXACTO de una plantilla aprobada en Meta, para re-enganchar a un lead fuera de la ventana de 24h. Vacío = no se reabre la conversación fuera de ventana. Ver "Ventana de 24h de WhatsApp". |
 | `WHATSAPP_REENGAGE_TEMPLATE_LANG` | Código de idioma de esa plantilla (default `es_AR`). Debe coincidir con el aprobado en Meta. |
+| `REENGAGE_ENABLED` | **Default `0` (apagado)**: habilita el re-engagement *proactivo* (`POST /reengage/run`). Ver "Re-engagement proactivo". |
+| `REENGAGE_TEMPLATE_NAME` | Plantilla del re-engagement proactivo. Vacío (default) = cae a `WHATSAPP_REENGAGE_TEMPLATE`; si ambas vacías, no manda nada. |
 | `ALLOWED_ORIGINS` | CORS: dominios del widget separados por coma, o `*`. |
 | `WHATSAPP_NUMBER_TO_PROJECT`, `LEAD_FORM_TO_PROJECT` | Ruteo opcional (JSON) de número/formulario a proyecto. Si vacío, todo cae en `agencia`. |
 | `NOTIFY_WEBHOOK_URL` | Opcional: webhook (Slack/Discord/Make/etc.) para avisar cuando entra un lead caliente. Vacío = solo log. |
@@ -145,6 +147,43 @@ habilitar el re-engagement fuera de ventana:
 
 Sin `WHATSAPP_REENGAGE_TEMPLATE` configurada, los envíos fuera de ventana se **omiten**
 (se loguea un warning) en vez de mandar un free-form que Graph rechazaría igual.
+
+### Re-engagement proactivo (fuera de ventana)
+
+Lo anterior reabre la ventana *cuando el bot ya iba a responder*. El **re-engagement
+proactivo** (`services/reengage_service.py`) va más allá: barre los leads cuya ventana de
+24h **ya cerró** y les manda la plantilla para reactivarlos, sin que haya un mensaje
+disparador. Está **SCAFFOLDEADO y apagado por default** — no manda nada hasta que lo
+prendas explícitamente.
+
+Cómo funciona:
+
+- `find_reengageable_conversations(db)` selecciona los **elegibles**: canal WhatsApp con
+  teléfono, ventana de 24h **cerrada** (o por cerrarse, con `closing_within`), **sin
+  re-enganchar antes** (`reengaged_at IS NULL`, idempotencia) y **sin opt-out**
+  (`reengage_opt_out`).
+- `run_reengagement(db)` manda la plantilla a cada uno y marca `reengaged_at` **solo tras
+  el envío OK**. Una segunda corrida no re-manda a los ya marcados.
+- **Doble gate (NO-OP seguro)**: si `REENGAGE_ENABLED` está en `0` **o** no hay plantilla
+  (`REENGAGE_TEMPLATE_NAME`, con fallback a `WHATSAPP_REENGAGE_TEMPLATE`), el servicio
+  **no manda nada** y devuelve `{"skipped": "disabled", ...}`.
+
+**Para activarlo** (en este orden): 1) creá y **aprobá** la plantilla en Meta (igual que
+arriba); 2) seteá `REENGAGE_TEMPLATE_NAME` (o reusá `WHATSAPP_REENGAGE_TEMPLATE`); 3) poné
+`REENGAGE_ENABLED=1`.
+
+**Trigger (cron externo).** El repo no tiene scheduler propio: la corrida periódica se
+dispara pegándole al endpoint admin, con la misma auth que `/leads`:
+
+```bash
+curl -X POST https://<tu-app>/reengage/run \
+  -H "Authorization: Bearer $ADMIN_API_KEY"
+```
+
+Cableá eso a un cron externo (Railway cron, GitHub Actions con `schedule`, o
+cron-job.org). Cadencia sugerida: **1 vez por hora** (acota el lag entre que la ventana
+cierra y el re-engagement; cada lead se manda **una sola vez** por la idempotencia, así
+que correr seguido no duplica envíos). Ejemplo de cron: `0 * * * *`.
 
 ## Deploy (Railway)
 

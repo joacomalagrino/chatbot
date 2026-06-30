@@ -56,15 +56,22 @@ class Settings(BaseSettings):
     # Ej: {"17841400000000000": "mesa"}. Vacío = todos al proyecto default.
     instagram_account_to_project: str = ""
 
+    # En dev permitimos localhost/127.0.0.1 en cualquier puerto (vía regex en el
+    # middleware), pero NO "*": acotamos aun en dev a los orígenes del widget.
+    dev_origin_regex: str = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+
     def origins_list(self) -> list[str]:
-        # En desarrollo abrimos CORS para probar el widget desde cualquier localhost/puerto.
-        if self.dev:
-            return ["*"]
         raw = (self.allowed_origins or "").strip()
         if raw == "*":
             return ["*"]
-        # Sin orígenes válidos en prod → fail-closed (no se permite ningún cross-origin).
-        return [o.strip() for o in raw.split(",") if o.strip()]
+        origins = [o.strip() for o in raw.split(",") if o.strip()]
+        # En dev sumamos los orígenes propios configurados; los localhost los cubre
+        # dev_origin_regex en el middleware. Sin orígenes válidos en prod → fail-closed.
+        return origins
+
+    def origin_regex(self) -> str | None:
+        # Solo en dev: habilita localhost en cualquier puerto sin abrir a "*".
+        return self.dev_origin_regex if self.dev else None
 
     def wa_number_map(self) -> dict:
         return _parse_json_map(self.whatsapp_number_to_project)

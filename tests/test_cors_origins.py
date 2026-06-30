@@ -35,12 +35,36 @@ def test_wildcard_explicito_se_respeta():
     assert s.origins_list() == ["*"]
 
 
-def test_dev_abre_cors():
+def test_dev_no_abre_a_wildcard():
+    # En dev NO se abre a "*": se acota a los orígenes del widget. Los localhost
+    # van por regex (no por la lista), así que la lista no contiene "*".
     s = _settings(allowed_origins="https://a.com")
     s.dev = True
-    assert s.origins_list() == ["*"]
+    assert s.origins_list() == ["https://a.com"]
+    assert "*" not in s.origins_list()
+
+
+def test_dev_regex_matchea_localhost_cualquier_puerto():
+    import re
+
+    s = _settings(allowed_origins="https://a.com")
+    s.dev = True
+    rx = s.origin_regex()
+    assert rx is not None
+    assert re.match(rx, "http://localhost:5173")
+    assert re.match(rx, "http://127.0.0.1:8080")
+    assert re.match(rx, "https://localhost")
+    # No matchea un dominio arbitrario.
+    assert not re.match(rx, "https://evil.com")
+    assert not re.match(rx, "http://localhost.evil.com")
+
+
+def test_prod_sin_regex():
+    s = _settings(allowed_origins="https://a.com")
+    assert s.origin_regex() is None
 
 
 def test_prod_vacio_es_fail_closed():
     s = _settings(allowed_origins="")
     assert s.origins_list() == []
+    assert s.origin_regex() is None

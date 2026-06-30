@@ -59,6 +59,8 @@ app.add_middleware(GZipMiddleware, minimum_size=512)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.origins_list(),
+    # En dev habilita localhost/127.0.0.1 en cualquier puerto SIN abrir a "*".
+    allow_origin_regex=settings.origin_regex(),
     allow_methods=["GET", "POST", "PATCH"],
     allow_headers=["*"],
 )

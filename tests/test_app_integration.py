@@ -146,6 +146,24 @@ def test_webhook_rejects_oversized_body(client):
     assert r.status_code == 413
 
 
+def test_webhook_rejects_oversized_body_sin_content_length(client):
+    """El tope se corta por BYTES LEÍDOS, no por Content-Length: un body chunked
+    (sin Content-Length) que supera el tope igual se rechaza con 413, sin que el
+    server bufferice todo el payload."""
+    big = b"z" * (webhook.MAX_WEBHOOK_BYTES + 5_000)
+
+    def gen():
+        # Enviar en chunks fuerza transfer-encoding chunked → sin Content-Length,
+        # así el header no puede ser la barrera; lo es el conteo de bytes leídos.
+        for _ in range(0, len(big), 16_384):
+            yield b"z" * 16_384
+
+    r = client.post(
+        "/webhook/meta", content=gen(), headers={"X-Hub-Signature-256": _sign(big)}
+    )
+    assert r.status_code == 413
+
+
 def test_webhook_rejects_bad_signature(client):
     body = json.dumps({"entry": []}).encode()
     r = client.post("/webhook/meta", content=body,

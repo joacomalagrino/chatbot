@@ -2,6 +2,21 @@
 builder = "NIXPACKS"
 
 [deploy]
-startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*'"
+# SEGURIDAD (X-Forwarded-For / rate-limit): `--forwarded-allow-ips` define DESDE QUÉ peers
+# uvicorn confía en el header X-Forwarded-For para resolver la IP real del cliente
+# (request.client.host), que es la CLAVE del rate-limit (ver ratelimit.py).
+#
+# Con '*' uvicorn confía en el XFF de CUALQUIER peer ⇒ un cliente puede spoofear su IP
+# mandando un X-Forwarded-For falso y evadir/envenenar el rate-limit. El fix correcto es
+# poner acá SOLO los CIDRs reales del edge de Railway (los proxies que de verdad están
+# delante de la app), p.ej.:
+#
+#   --forwarded-allow-ips='100.64.0.0/10,10.0.0.0/8'   # ← CIDRs REALES del edge, NO confirmados
+#
+# TODO(seguridad): reemplazar '*' por los rangos reales del edge de Railway. Hasta tenerlos
+# confirmados se deja parametrizable por entorno (FORWARDED_ALLOW_IPS) SIN cambiar el
+# comportamiento actual por default: si la variable no está seteada, cae en '*' (lo de hoy).
+# Seteá FORWARDED_ALLOW_IPS con los CIDRs del edge en el entorno de Railway para cerrar el agujero.
+startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips=\"${FORWARDED_ALLOW_IPS:-*}\""
 healthcheckPath = "/health"
 restartPolicyType = "ON_FAILURE"

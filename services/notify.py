@@ -13,6 +13,11 @@ from config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+# Referencias fuertes a las tareas fire-and-forget en vuelo. asyncio.create_task solo
+# guarda una referencia DÉBIL: sin esto el GC puede recolectar (y cancelar) la tarea
+# antes de que termine, y la alerta de lead caliente nunca se enviaría.
+_pending_tasks: set = set()
+
 
 def _format(s: dict) -> str:
     contacto = s.get("phone") or s.get("email") or s.get("instagram") or "s/contacto"
@@ -36,7 +41,11 @@ def fire_hot_lead(summary: dict) -> None:
     payload = {"text": _format(summary), "lead": summary}
     try:
         # Si hay un event loop corriendo (camino async del webhook/chat), fire-and-forget.
-        asyncio.get_running_loop().create_task(_post(url, payload))
+        # Guardar referencia fuerte hasta que termine (ver _pending_tasks) para que el GC
+        # no la cancele en medio.
+        task = asyncio.get_running_loop().create_task(_post(url, payload))
+        _pending_tasks.add(task)
+        task.add_done_callback(_pending_tasks.discard)
     except RuntimeError:
         # Sin loop (camino sync/tests): POST inline best-effort.
         try:

@@ -318,6 +318,34 @@ def test_handle_lead_ad_releases_event_when_persist_fails(fresh_db, monkeypatch)
     assert c["events"] == 0
 
 
+# ───────────────────────── _claim_event: referencia fuerte a la purga ───────
+
+def test_claim_event_retiene_referencia_fuerte_a_la_task_de_purga(fresh_db, monkeypatch):
+    """C3: al reclamar un evento con un loop corriendo se lanza la purga fire-and-forget;
+    debe quedar retenida en _pending_tasks (referencia fuerte) hasta terminar, donde el
+    done_callback la descarta. Sin esto el GC podría cancelarla."""
+    async def fake_purge():
+        return None
+
+    monkeypatch.setattr(webhook, "_maybe_purge_events", fake_purge)
+
+    async def run():
+        webhook._pending_tasks.clear()
+        db = database.SessionLocal()
+        try:
+            assert webhook._claim_event(db, "ev_strongref") is True
+            # Quedó retenida con referencia fuerte mientras está en vuelo.
+            assert len(webhook._pending_tasks) == 1
+            # Dejar correr la task: el done_callback la descarta.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert len(webhook._pending_tasks) == 0
+        finally:
+            db.close()
+
+    asyncio.run(run())
+
+
 # ───────────────────────── _deliver ────────────────────────────────────────
 
 def test_deliver_returns_true_on_success(fresh_db):

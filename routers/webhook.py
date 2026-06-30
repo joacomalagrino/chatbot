@@ -148,6 +148,11 @@ _PURGE_INTERVAL_S = 3600
 _last_purge = 0.0
 _purge_lock = asyncio.Lock()
 
+# Referencias fuertes a las tareas de purga fire-and-forget en vuelo. create_task solo
+# guarda una referencia débil: sin esto el GC podría recolectarlas (y cancelarlas) antes
+# de que terminen.
+_pending_tasks: set = set()
+
 
 def purge_old_events(db: Session, days: int = EVENT_TTL_DAYS) -> int:
     """Borra los processed_events más viejos que `days`. Meta no reintenta un webhook tras
@@ -205,7 +210,9 @@ def _claim_event(db: Session, event_id: str) -> bool:
         # omite — la purga es best-effort y no afecta la idempotencia. La tarea abre
         # su propia sesión (no le pasamos `db`, que es del request).
         try:
-            asyncio.get_running_loop().create_task(_maybe_purge_events())
+            task = asyncio.get_running_loop().create_task(_maybe_purge_events())
+            _pending_tasks.add(task)
+            task.add_done_callback(_pending_tasks.discard)
         except RuntimeError:
             pass
         return True

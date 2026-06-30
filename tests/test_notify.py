@@ -18,6 +18,37 @@ def db():
     models.Base.metadata.drop_all(bind=database.engine)
 
 
+def test_fire_hot_lead_guarda_referencia_fuerte_a_la_task(monkeypatch):
+    """C3: con un event loop corriendo y NOTIFY_WEBHOOK_URL seteado, fire_hot_lead crea la
+    task de POST y la retiene en _pending_tasks (referencia fuerte) hasta que termina, donde
+    el done_callback la descarta. Sin esto el GC podría cancelarla y la alerta no se enviaría."""
+    import asyncio
+
+    from services import notify
+
+    monkeypatch.setattr(notify.settings, "notify_webhook_url", "https://hook.example/x")
+
+    posted = []
+
+    async def fake_post(url, payload):
+        posted.append((url, payload))
+
+    monkeypatch.setattr(notify, "_post", fake_post)
+
+    async def run():
+        notify._pending_tasks.clear()
+        notify.fire_hot_lead({"project": "agencia", "channel": "web", "name": "x"})
+        # La task quedó retenida con referencia fuerte mientras está en vuelo.
+        assert len(notify._pending_tasks) == 1
+        # Dejar correr la task: el done_callback la descarta del set.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert len(notify._pending_tasks) == 0
+
+    asyncio.run(run())
+    assert posted == [("https://hook.example/x", posted[0][1])]
+
+
 def test_fire_hot_lead_sin_webhook_no_falla():
     from services.notify import fire_hot_lead
     # Sin NOTIFY_WEBHOOK_URL (default ""), solo loguea y no lanza.

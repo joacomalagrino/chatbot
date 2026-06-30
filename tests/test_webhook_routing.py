@@ -194,6 +194,77 @@ def test_handle_change_ignores_unknown_field(fresh_db):
     assert _counts() == {"conversations": 0, "messages": 0, "leads": 0, "events": 0}
 
 
+# ───────────────────────── _handle_ig_event: ruteo por cuenta ──────────────
+
+def _ig_event(ig_id, recipient_id, text="hola", mid="m1"):
+    return {
+        "sender": {"id": ig_id},
+        "recipient": {"id": recipient_id},
+        "message": {"mid": mid, "text": text},
+    }
+
+
+def test_handle_ig_event_routes_to_default_without_config(fresh_db, monkeypatch):
+    """Sin INSTAGRAM_ACCOUNT_TO_PROJECT, el DM cae al proyecto default."""
+    sent = []
+
+    async def capture(ig_id, text, *a, **k):
+        sent.append((ig_id, text))
+
+    monkeypatch.setattr(webhook, "send_instagram_message", capture)
+    monkeypatch.setattr(type(webhook.settings), "ig_account_map", lambda self: {})
+
+    db = database.SessionLocal()
+    try:
+        asyncio.run(webhook._handle_ig_event(db, _ig_event("USER1", "ACCT_X")))
+        conv = db.query(models.Conversation).filter_by(session_id="ig_USER1").first()
+        assert conv is not None
+        assert conv.project == webhook.DEFAULT_INSTAGRAM_PROJECT
+    finally:
+        db.close()
+    assert sent == [("USER1", "respuesta")]
+
+
+def test_handle_ig_event_routes_by_recipient_account(fresh_db, monkeypatch):
+    """Con config, el recipient.id mapea al proyecto de esa cuenta."""
+    async def capture(ig_id, text, *a, **k):
+        pass
+
+    monkeypatch.setattr(webhook, "send_instagram_message", capture)
+    monkeypatch.setattr(
+        type(webhook.settings), "ig_account_map", lambda self: {"ACCT_MESA": "mesa"}
+    )
+
+    db = database.SessionLocal()
+    try:
+        asyncio.run(webhook._handle_ig_event(db, _ig_event("USER2", "ACCT_MESA")))
+        conv = db.query(models.Conversation).filter_by(session_id="ig_USER2").first()
+        assert conv is not None
+        assert conv.project == "mesa"
+    finally:
+        db.close()
+
+
+def test_handle_ig_event_unmapped_account_falls_to_default(fresh_db, monkeypatch):
+    """Una cuenta no presente en el mapping cae al default."""
+    async def capture(ig_id, text, *a, **k):
+        pass
+
+    monkeypatch.setattr(webhook, "send_instagram_message", capture)
+    monkeypatch.setattr(
+        type(webhook.settings), "ig_account_map", lambda self: {"ACCT_MESA": "mesa"}
+    )
+
+    db = database.SessionLocal()
+    try:
+        asyncio.run(webhook._handle_ig_event(db, _ig_event("USER3", "ACCT_OTRA")))
+        conv = db.query(models.Conversation).filter_by(session_id="ig_USER3").first()
+        assert conv is not None
+        assert conv.project == webhook.DEFAULT_INSTAGRAM_PROJECT
+    finally:
+        db.close()
+
+
 # ───────────────────────── _handle_lead_ad ─────────────────────────────────
 
 def test_handle_lead_ad_fetches_claims_and_persists_lead(fresh_db, monkeypatch):
@@ -233,6 +304,46 @@ def test_handle_lead_ad_fetches_claims_and_persists_lead(fresh_db, monkeypatch):
     # Un Lead Ad entra como caliente: se avisa al equipo.
     assert len(notified) == 1
     assert notified[0]["channel"] == "lead_ad"
+
+
+def test_handle_lead_ad_interests_excluye_campos_de_contacto(fresh_db, monkeypatch):
+    """C6: full_name/name/email/phone_number/phone NO se duplican como tags en interests
+    (ya van en name/email/phone). Los campos no-contacto sí quedan."""
+    async def fake_lead(leadgen_id):
+        return {"field_data": [
+            {"name": "full_name", "values": ["Ana Pérez"]},
+            {"name": "email", "values": ["ana@test.com"]},
+            {"name": "phone_number", "values": ["+5491133334444"]},
+            {"name": "phone", "values": ["+5491133334444"]},
+            {"name": "presupuesto", "values": ["alto"]},
+            {"name": "zona", "values": ["Palermo"]},
+        ]}
+
+    monkeypatch.setattr(webhook, "get_lead_data", fake_lead)
+    monkeypatch.setattr(webhook, "fire_hot_lead", lambda payload: None)
+
+    db = database.SessionLocal()
+    try:
+        asyncio.run(webhook._handle_lead_ad(db, {"leadgen_id": "c6", "form_id": "F1"}))
+    finally:
+        db.close()
+
+    db = database.SessionLocal()
+    try:
+        lead = db.query(models.Lead).filter_by(project="agencia").first()
+        assert lead is not None
+        # Ningún campo de contacto aparece como tag.
+        for prefix in ("full_name:", "name:", "email:", "phone_number:", "phone:"):
+            assert not any(i.startswith(prefix) for i in lead.interests), prefix
+        # Los campos no-contacto sí quedan.
+        assert "presupuesto: alto" in lead.interests
+        assert "zona: Palermo" in lead.interests
+        # Pero el contacto sigue persistido en sus columnas dedicadas.
+        assert lead.name == "Ana Pérez"
+        assert lead.email == "ana@test.com"
+        assert lead.phone == "+5491133334444"
+    finally:
+        db.close()
 
 
 def test_handle_lead_ad_without_leadgen_id_is_noop(fresh_db, monkeypatch):
@@ -316,6 +427,34 @@ def test_handle_lead_ad_releases_event_when_persist_fails(fresh_db, monkeypatch)
     c = _counts()
     assert c["leads"] == 0
     assert c["events"] == 0
+
+
+# ───────────────────────── _claim_event: referencia fuerte a la purga ───────
+
+def test_claim_event_retiene_referencia_fuerte_a_la_task_de_purga(fresh_db, monkeypatch):
+    """C3: al reclamar un evento con un loop corriendo se lanza la purga fire-and-forget;
+    debe quedar retenida en _pending_tasks (referencia fuerte) hasta terminar, donde el
+    done_callback la descarta. Sin esto el GC podría cancelarla."""
+    async def fake_purge():
+        return None
+
+    monkeypatch.setattr(webhook, "_maybe_purge_events", fake_purge)
+
+    async def run():
+        webhook._pending_tasks.clear()
+        db = database.SessionLocal()
+        try:
+            assert webhook._claim_event(db, "ev_strongref") is True
+            # Quedó retenida con referencia fuerte mientras está en vuelo.
+            assert len(webhook._pending_tasks) == 1
+            # Dejar correr la task: el done_callback la descarta.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert len(webhook._pending_tasks) == 0
+        finally:
+            db.close()
+
+    asyncio.run(run())
 
 
 # ───────────────────────── _deliver ────────────────────────────────────────

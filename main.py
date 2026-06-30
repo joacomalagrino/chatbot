@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -10,7 +11,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from sqlalchemy import text
 
-from auth import require_admin
+from auth import check_basic_admin, require_admin
 from config import get_settings
 from database import engine, init_db, is_pool_exhaustion
 from observability import configure_logging, log_pool_exhaustion, log_startup_config
@@ -89,6 +90,8 @@ app.add_middleware(GZipMiddleware, minimum_size=512)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.origins_list(),
+    # En dev habilita localhost/127.0.0.1 en cualquier puerto SIN abrir a "*".
+    allow_origin_regex=settings.origin_regex(),
     allow_methods=["GET", "POST", "PATCH"],
     allow_headers=["*"],
 )
@@ -129,6 +132,18 @@ async def pool_exhaustion_observer(request: Request, call_next):
 
 @app.middleware("http")
 async def security_and_cache_headers(request: Request, call_next):
+    # Gate server-side del panel estático: el navegador manda credenciales HTTP
+    # Basic en el GET inicial (un Bearer en JS no puede), validadas contra
+    # ADMIN_API_KEY. Sin esto, el shell del panel quedaba servido sin auth. La
+    # ventana del navegador queda autenticada y el JS sigue usando su Bearer para
+    # las llamadas a la API (mismo valor de ADMIN_API_KEY).
+    if request.url.path.startswith("/admin"):
+        if not check_basic_admin(request.headers.get("Authorization", "")):
+            return Response(
+                status_code=401,
+                content="No autorizado",
+                headers={"WWW-Authenticate": 'Basic realm="admin"'},
+            )
     response = await call_next(request)
     for k, v in _SECURITY_HEADERS.items():
         response.headers.setdefault(k, v)

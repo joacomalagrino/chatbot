@@ -35,6 +35,10 @@ DEFAULT_LEADFORM_PROJECT = "agencia"
 # Los webhooks de Meta son chicos; cualquier cosa enorme es abuso.
 MAX_WEBHOOK_BYTES = 256 * 1024
 
+# Campos de contacto del Lead Ad que ya van a name/email/phone: se excluyen de `interests`
+# para no duplicarlos como tags en el panel.
+_LEAD_CONTACT_FIELDS = frozenset({"full_name", "name", "email", "phone_number", "phone"})
+
 
 def _is_optout_message(text: str) -> bool:
     """¿El inbound es un pedido de baja del re-engagement? Match exacto contra las palabras
@@ -100,12 +104,22 @@ async def verify_webhook(
 # replay ya están cubiertos sin dropear tráfico legítimo: la firma HMAC (_valid_signature)
 # rechaza payloads no firmados y la dedup por event_id (_claim_event) descarta reintentos.
 async def receive_meta_event(request: Request, background_tasks: BackgroundTasks):
+    # Cortar por BYTES LEÍDOS, no por Content-Length: el header puede faltar
+    # (transfer-encoding: chunked) o mentir, y `await request.body()` bufferiza
+    # TODO en memoria antes de poder chequear el tamaño. Acá leemos por chunks y
+    # abortamos apenas superamos el tope, sin bufferizar el resto. El header sirve
+    # solo como fast-fail temprano.
     cl = request.headers.get("content-length")
     if cl and cl.isdigit() and int(cl) > MAX_WEBHOOK_BYTES:
         raise HTTPException(status_code=413, detail="Payload demasiado grande")
-    body_bytes = await request.body()
-    if len(body_bytes) > MAX_WEBHOOK_BYTES:
-        raise HTTPException(status_code=413, detail="Payload demasiado grande")
+    chunks = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > MAX_WEBHOOK_BYTES:
+            raise HTTPException(status_code=413, detail="Payload demasiado grande")
+        chunks.append(chunk)
+    body_bytes = b"".join(chunks)
     if not _valid_signature(body_bytes, request.headers.get("X-Hub-Signature-256", "")):
         raise HTTPException(status_code=403, detail="Firma inválida")
 
@@ -161,6 +175,11 @@ EVENT_TTL_DAYS = 7
 _PURGE_INTERVAL_S = 3600
 _last_purge = 0.0
 _purge_lock = asyncio.Lock()
+
+# Referencias fuertes a las tareas de purga fire-and-forget en vuelo. create_task solo
+# guarda una referencia débil: sin esto el GC podría recolectarlas (y cancelarlas) antes
+# de que terminen.
+_pending_tasks: set = set()
 
 
 def purge_old_events(db: Session, days: int = EVENT_TTL_DAYS) -> int:
@@ -219,7 +238,9 @@ def _claim_event(db: Session, event_id: str) -> bool:
         # omite — la purga es best-effort y no afecta la idempotencia. La tarea abre
         # su propia sesión (no le pasamos `db`, que es del request).
         try:
-            asyncio.get_running_loop().create_task(_maybe_purge_events())
+            task = asyncio.get_running_loop().create_task(_maybe_purge_events())
+            _pending_tasks.add(task)
+            task.add_done_callback(_pending_tasks.discard)
         except RuntimeError:
             pass
         return True
@@ -284,7 +305,13 @@ async def _handle_ig_event(db: Session, event: dict):
     event_id = f"ig_{mid}" if mid else ""
     if not _claim_event(db, event_id):
         return
-    project = _resolve_project("", {}, DEFAULT_INSTAGRAM_PROJECT)
+    # Ruteo por cuenta: recipient.id es la cuenta de IG que recibió el DM. Si hay
+    # config (INSTAGRAM_ACCOUNT_TO_PROJECT), mapeamos a su proyecto; si no, cae al
+    # default (mismo comportamiento previo, pero con el hook ya cableado).
+    recipient_id = event.get("recipient", {}).get("id", "")
+    project = _resolve_project(
+        recipient_id, settings.ig_account_map(), DEFAULT_INSTAGRAM_PROJECT
+    )
     conversation = get_or_create_conversation(
         db, f"ig_{ig_id}", project, "instagram", contact_instagram=ig_id
     )
@@ -419,7 +446,13 @@ async def _handle_lead_ad(db: Session, value: dict):
     lead.phone = phone
     # interests como lista de strings "campo: valor": el panel lo renderiza como tags
     # (.length/.map). Guardar el dict crudo hacía que nunca aparecieran las tags.
-    lead.interests = [f"{k}: {v}" for k, v in fields.items()]
+    # Excluir los campos de contacto (ya van en name/email/phone): si no, se duplicaban
+    # como tags (full_name, name, email, phone_number, phone).
+    lead.interests = [
+        f"{k}: {v}"
+        for k, v in fields.items()
+        if k not in _LEAD_CONTACT_FIELDS
+    ]
     lead.status = "new"
     lead.notes = f"Vino de Lead Ad (form {form_id}, ad {value.get('ad_id', '?')})"
 

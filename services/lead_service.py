@@ -11,6 +11,17 @@ def _apply_contact(conversation: Conversation, lead: Lead, contact: dict) -> boo
     ya cargado (solo rellena lo vacío). Devuelve True si cambió algo. No commitea."""
     changed = False
 
+    # Adoptar el contacto que ya viene en la conversación (lo persiste el webhook:
+    # contact_phone en WhatsApp, contact_instagram en IG) aunque el texto del mensaje
+    # no traiga el dato. Sin esto el teléfono del lead de WhatsApp nunca llegaba a Lead.phone.
+    if not lead.phone and conversation.contact_phone:
+        lead.phone = conversation.contact_phone
+        changed = True
+
+    if not lead.instagram and conversation.contact_instagram:
+        lead.instagram = conversation.contact_instagram
+        changed = True
+
     if contact["phone"] and not lead.phone:
         lead.phone = contact["phone"]
         conversation.contact_phone = lead.phone

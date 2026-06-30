@@ -163,6 +163,22 @@ def init_db():
             command.stamp(cfg, BASELINE_REVISION)
         command.upgrade(cfg, "head")
         _ensure_indexes()  # backstop idempotente (prod ya los tiene)
-    except Exception:
-        logger.exception("Alembic falló en el arranque; fallback a create_all")
+    except Exception as exc:
+        # Caer a create_all deja el schema desincronizado de las migraciones SIN
+        # control de versiones (no se aplican las migraciones posteriores al
+        # baseline): la app arranca "sana" pero puede romper en runtime por una
+        # columna faltante. NO cambiamos el comportamiento (seguimos arrancando),
+        # pero alarmamos fuerte para que el fallback nunca pase silencioso.
+        logger.critical(
+            "ALARMA: Alembic falló en el arranque; fallback a create_all(). "
+            "El schema puede quedar DESINCRONIZADO de las migraciones y romper en "
+            "runtime por columnas faltantes. Revisar el tooling de Alembic.",
+            exc_info=True,
+        )
+        try:
+            import observability
+
+            observability.record_error("database.init_db.alembic_fallback", exc)
+        except Exception:  # nunca dejar que la observabilidad impida el arranque
+            logger.exception("No se pudo registrar el fallback en observability")
         create_tables()

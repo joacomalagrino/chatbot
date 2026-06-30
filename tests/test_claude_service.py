@@ -138,10 +138,65 @@ def test_system_prompt_includes_persona_goal_and_questions(monkeypatch):
 
 def test_history_is_capped_to_last_20(monkeypatch):
     captured = _patch_create(monkeypatch, returns=FakeResponse([Block("text", "ok")]))
-    history = [{"role": "user", "content": "m%d" % i} for i in range(50)]
+    # Historial alternado user/assistant (realista): el cap toma los últimos 20.
+    history = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": "m%d" % i}
+        for i in range(50)
+    ]
     _run(message="nuevo", history=history)
     sent = captured["messages"]
-    # history[-20:] + el mensaje nuevo => 21.
+    # history[-20:] (m30..m49, alternados) + el mensaje nuevo => 21.
     assert len(sent) == 21
     assert sent[-1] == {"role": "user", "content": "nuevo"}
     assert sent[0] == {"role": "user", "content": "m30"}
+
+
+# ───────────────────────── normalización de roles consecutivos ────
+
+def test_collapses_consecutive_same_role_messages(monkeypatch):
+    """Dos turnos seguidos del mismo rol (p.ej. doble envío de WhatsApp) se
+    colapsan en uno solo antes de mandar a Claude, preservando la alternancia."""
+    captured = _patch_create(monkeypatch, returns=FakeResponse([Block("text", "ok")]))
+    history = [
+        {"role": "user", "content": "hola"},
+        {"role": "user", "content": "estás?"},
+        {"role": "assistant", "content": "¡Hola!"},
+    ]
+    _run(message="quiero un auto", history=history)
+    sent = captured["messages"]
+    # Los dos 'user' iniciales se unen; luego assistant; luego el nuevo user.
+    assert sent == [
+        {"role": "user", "content": "hola\nestás?"},
+        {"role": "assistant", "content": "¡Hola!"},
+        {"role": "user", "content": "quiero un auto"},
+    ]
+
+
+def test_collapses_consecutive_assistant_then_user(monkeypatch):
+    """El último mensaje (siempre user) se colapsa con un user previo del historial."""
+    captured = _patch_create(monkeypatch, returns=FakeResponse([Block("text", "ok")]))
+    history = [
+        {"role": "assistant", "content": "Contame qué buscás."},
+        {"role": "user", "content": "una SUV"},
+    ]
+    _run(message="usada", history=history)
+    sent = captured["messages"]
+    assert sent == [
+        {"role": "assistant", "content": "Contame qué buscás."},
+        {"role": "user", "content": "una SUV\nusada"},
+    ]
+
+
+def test_drops_empty_content_messages(monkeypatch):
+    """Mensajes con content vacío se descartan (no rompen la alternancia)."""
+    captured = _patch_create(monkeypatch, returns=FakeResponse([Block("text", "ok")]))
+    history = [
+        {"role": "user", "content": ""},
+        {"role": "assistant", "content": "Hola"},
+    ]
+    _run(message="che", history=history)
+    sent = captured["messages"]
+    assert sent == [
+        {"role": "assistant", "content": "Hola"},
+        {"role": "user", "content": "che"},
+    ]

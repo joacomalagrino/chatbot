@@ -126,6 +126,56 @@ def test_stream_emits_error_frame_on_failure(client, monkeypatch):
     assert not any("delta" in f for f in frames)
 
 
+def test_stream_persists_when_client_disconnects_midway(monkeypatch):
+    """C2: si el cliente se desconecta a mitad del stream (GeneratorExit lanzado en el
+    yield), el Message del asistente con lo generado hasta ese punto y el update del lead
+    igual se persisten (la persistencia vive en un finally)."""
+    import asyncio
+
+    models.Base.metadata.drop_all(bind=database.engine)
+    models.Base.metadata.create_all(bind=database.engine)
+
+    async def fake_stream(project, project_config, message, history):
+        for delta in ["parte1 ", "parte2 ", "parte3"]:
+            yield delta
+
+    monkeypatch.setattr(convsvc, "stream_ai_response", fake_stream)
+
+    async def run():
+        db = database.SessionLocal()
+        try:
+            conv = convsvc.get_or_create_conversation(db, "disc1", "agencia", "web")
+            agen = convsvc.stream_turn(db, conv, "hola, mi mail es ana@test.com")
+            # Consumir solo el primer delta y luego cerrar el generador: simula la
+            # desconexión del cliente (Starlette hace aclose() sobre el async gen).
+            first = await agen.__anext__()
+            assert first == "parte1 "
+            await agen.aclose()
+        finally:
+            db.close()
+
+    asyncio.run(run())
+
+    db = database.SessionLocal()
+    try:
+        conv = db.query(models.Conversation).filter_by(session_id="disc1").first()
+        assert conv is not None
+        asst = db.query(models.Message).filter_by(
+            conversation_id=conv.id, role="assistant"
+        ).first()
+        # Persistió el Message del asistente con lo generado antes del corte.
+        assert asst is not None
+        assert asst.content == "parte1 "
+        # Y el lead se actualizó pese a la desconexión.
+        lead = db.query(models.Lead).filter_by(conversation_id=conv.id).first()
+        assert lead is not None
+        assert lead.email == "ana@test.com"
+    finally:
+        db.close()
+
+    models.Base.metadata.drop_all(bind=database.engine)
+
+
 def test_stream_does_not_break_plain_chat(client, monkeypatch):
     """El /chat no-streaming (fallback) sigue intacto: el streaming es aditivo. /chat usa
     get_ai_response (no stream_ai_response), así que lo stubeamos aparte para no tocar la red."""

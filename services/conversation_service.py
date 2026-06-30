@@ -113,14 +113,20 @@ async def stream_turn(db: Session, conversation: Conversation, text: str):
     history = [{"role": m.role, "content": m.content} for m in recent]
 
     parts = []
-    async for delta in stream_ai_response(
-        conversation.project, PROJECTS[conversation.project], text, history
-    ):
-        parts.append(delta)
-        yield delta
-
-    response_text = "".join(parts)
-    db.add(Message(conversation_id=conversation.id, role="assistant", content=response_text))
-    db.commit()
-
-    update_lead_from_message(db, conversation, text)
+    try:
+        async for delta in stream_ai_response(
+            conversation.project, PROJECTS[conversation.project], text, history
+        ):
+            parts.append(delta)
+            yield delta
+    finally:
+        # Persistir en finally para que sobreviva una desconexión del cliente
+        # (GeneratorExit lanzado en el `yield`): de lo contrario se perdían el Message
+        # del asistente y el update del lead, aunque Claude ya hubiera generado texto.
+        response_text = "".join(parts)
+        if response_text:
+            db.add(
+                Message(conversation_id=conversation.id, role="assistant", content=response_text)
+            )
+            db.commit()
+            update_lead_from_message(db, conversation, text)

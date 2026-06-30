@@ -37,3 +37,33 @@ def test_notifica_en_transicion_a_hot(db, monkeypatch):
     # Otro cambio (agrega instagram) pero ya estaba hot → NO vuelve a notificar.
     update_lead_from_message(db, conv, "mi ig es @juani")
     assert len(calls) == 1
+
+
+def test_inbound_wa_adopta_contact_phone_aunque_el_texto_no_traiga_numero(db, monkeypatch):
+    """C1: un inbound de WhatsApp setea Lead.phone desde conversation.contact_phone
+    (que persiste el webhook) aunque el texto del mensaje no contenga ningún número."""
+    monkeypatch.setattr(lead_service, "fire_hot_lead", lambda s: None)
+
+    conv = get_or_create_conversation(
+        db, "wa_5491100000000", "agencia", "whatsapp", contact_phone="5491100000000"
+    )
+    changed = update_lead_from_message(db, conv, "hola, quiero más info")
+
+    assert changed is True
+    assert conv.lead is not None
+    assert conv.lead.phone == "5491100000000"
+
+
+def test_inbound_ig_adopta_contact_instagram_aunque_el_texto_no_traiga_handle(db, monkeypatch):
+    """C1 (equivalente IG): el handle de IG que persiste el webhook (contact_instagram)
+    se adopta en Lead.instagram aunque el texto no traiga un @handle."""
+    monkeypatch.setattr(lead_service, "fire_hot_lead", lambda s: None)
+
+    conv = get_or_create_conversation(
+        db, "ig_abc123", "agencia", "instagram", contact_instagram="abc123"
+    )
+    changed = update_lead_from_message(db, conv, "hola, quiero más info")
+
+    assert changed is True
+    assert conv.lead is not None
+    assert conv.lead.instagram == "abc123"

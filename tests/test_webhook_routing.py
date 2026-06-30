@@ -235,6 +235,46 @@ def test_handle_lead_ad_fetches_claims_and_persists_lead(fresh_db, monkeypatch):
     assert notified[0]["channel"] == "lead_ad"
 
 
+def test_handle_lead_ad_interests_excluye_campos_de_contacto(fresh_db, monkeypatch):
+    """C6: full_name/name/email/phone_number/phone NO se duplican como tags en interests
+    (ya van en name/email/phone). Los campos no-contacto sí quedan."""
+    async def fake_lead(leadgen_id):
+        return {"field_data": [
+            {"name": "full_name", "values": ["Ana Pérez"]},
+            {"name": "email", "values": ["ana@test.com"]},
+            {"name": "phone_number", "values": ["+5491133334444"]},
+            {"name": "phone", "values": ["+5491133334444"]},
+            {"name": "presupuesto", "values": ["alto"]},
+            {"name": "zona", "values": ["Palermo"]},
+        ]}
+
+    monkeypatch.setattr(webhook, "get_lead_data", fake_lead)
+    monkeypatch.setattr(webhook, "fire_hot_lead", lambda payload: None)
+
+    db = database.SessionLocal()
+    try:
+        asyncio.run(webhook._handle_lead_ad(db, {"leadgen_id": "c6", "form_id": "F1"}))
+    finally:
+        db.close()
+
+    db = database.SessionLocal()
+    try:
+        lead = db.query(models.Lead).filter_by(project="agencia").first()
+        assert lead is not None
+        # Ningún campo de contacto aparece como tag.
+        for prefix in ("full_name:", "name:", "email:", "phone_number:", "phone:"):
+            assert not any(i.startswith(prefix) for i in lead.interests), prefix
+        # Los campos no-contacto sí quedan.
+        assert "presupuesto: alto" in lead.interests
+        assert "zona: Palermo" in lead.interests
+        # Pero el contacto sigue persistido en sus columnas dedicadas.
+        assert lead.name == "Ana Pérez"
+        assert lead.email == "ana@test.com"
+        assert lead.phone == "+5491133334444"
+    finally:
+        db.close()
+
+
 def test_handle_lead_ad_without_leadgen_id_is_noop(fresh_db, monkeypatch):
     async def boom(leadgen_id):
         raise AssertionError("no debería pegarle a Graph sin leadgen_id")

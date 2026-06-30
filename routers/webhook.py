@@ -35,6 +35,10 @@ DEFAULT_LEADFORM_PROJECT = "agencia"
 # Los webhooks de Meta son chicos; cualquier cosa enorme es abuso.
 MAX_WEBHOOK_BYTES = 256 * 1024
 
+# Campos de contacto del Lead Ad que ya van a name/email/phone: se excluyen de `interests`
+# para no duplicarlos como tags en el panel.
+_LEAD_CONTACT_FIELDS = frozenset({"full_name", "name", "email", "phone_number", "phone"})
+
 
 def _resolve_project(value: str, mapping: dict, default: str) -> str:
     """Resuelve el proyecto desde un mapping; cae al default y garantiza que exista."""
@@ -364,7 +368,13 @@ async def _handle_lead_ad(db: Session, value: dict):
     lead.phone = phone
     # interests como lista de strings "campo: valor": el panel lo renderiza como tags
     # (.length/.map). Guardar el dict crudo hacía que nunca aparecieran las tags.
-    lead.interests = [f"{k}: {v}" for k, v in fields.items()]
+    # Excluir los campos de contacto (ya van en name/email/phone): si no, se duplicaban
+    # como tags (full_name, name, email, phone_number, phone).
+    lead.interests = [
+        f"{k}: {v}"
+        for k, v in fields.items()
+        if k not in _LEAD_CONTACT_FIELDS
+    ]
     lead.status = "new"
     lead.notes = f"Vino de Lead Ad (form {form_id}, ad {value.get('ad_id', '?')})"
 

@@ -134,39 +134,46 @@ async def receive_meta_event(request: Request, background_tasks: BackgroundTasks
     return {"status": "ok"}
 
 
+def _log_event_failure(exc: Exception, where: str, **ctx) -> None:
+    """Registra el fallo de UN evento del webhook, sin abortar los hermanos. La saturación
+    del pool (señal #1 bajo ráfaga) se marca aparte (WARN + contador) para que no se pierda
+    entre los errores genéricos; todo queda además en el registro de errores recientes
+    (observability.record_error) para verlo desde el panel sin entrar a los logs de Railway."""
+    if is_pool_exhaustion(exc):
+        log_pool_exhaustion(exc, where=where, **ctx)
+    logger.exception("Error procesando evento de webhook (%s)", where)
+    record_error(where, exc, **ctx)
+
+
 async def _process_event(body: dict):
     """Procesa el webhook con su propia sesión de DB (la de get_db ya está cerrada).
 
     Esta tarea corre en BACKGROUND (background_tasks.add_task): FastAPI NO reporta sus
-    excepciones, así que cualquier fallo acá sería silencioso = lead perdido. El except
-    global LOGUEA con contexto y además lo deja en el registro de errores recientes
-    (observability.record_error) para verlo desde el panel sin entrar a los logs de Railway.
+    excepciones, así que cualquier fallo acá sería silencioso = lead perdido.
+
+    Cada evento se procesa AISLADO en su propio try: Meta agrupa varios eventos por entrega
+    y nosotros respondemos 200 al toque (Meta NO reintenta), así que un fallo en uno NO debe
+    llevarse puestos a los hermanos del mismo webhook. El fallo se loguea (con rollback para
+    dejar la sesión limpia para el próximo) y se sigue. Los propios handlers ya liberan su
+    claim antes de propagar, así que el reintento de Meta —si llega— reprocesa ese evento.
     """
     db = SessionLocal()
     try:
         for entry in body.get("entry", []):
             # Instagram / Messenger DMs llegan a nivel `messaging`.
             for event in entry.get("messaging", []):
-                await _handle_ig_event(db, event)
+                try:
+                    await _handle_ig_event(db, event)
+                except Exception as exc:
+                    db.rollback()
+                    _log_event_failure(exc, "webhook._handle_ig_event")
             # WhatsApp y Lead Ads llegan bajo `changes`.
             for change in entry.get("changes", []):
-                await _handle_change(db, change)
-    except Exception as exc:
-        # Qué campos trae el webhook ayuda a saber qué se perdió, sin volcar PII del lead.
-        fields = sorted({
-            change.get("field")
-            for entry in body.get("entry", [])
-            for change in entry.get("changes", [])
-            if change.get("field")
-        })
-        # Saturación del pool de DB: es la señal #1 de que la app está al techo bajo la
-        # ráfaga de webhooks. La marcamos aparte (WARN + contador) para que no se pierda
-        # entre los errores genéricos del registro; igual la dejamos en _process_event para
-        # saber qué evento se perdió.
-        if is_pool_exhaustion(exc):
-            log_pool_exhaustion(exc, where="webhook._process_event", fields=fields)
-        logger.exception("Error procesando webhook Meta (fields=%s)", fields)
-        record_error("webhook._process_event", exc, fields=fields)
+                try:
+                    await _handle_change(db, change)
+                except Exception as exc:
+                    db.rollback()
+                    _log_event_failure(exc, "webhook._handle_change", field=change.get("field"))
     finally:
         db.close()
 
@@ -312,15 +319,12 @@ async def _handle_ig_event(db: Session, event: dict):
     project = _resolve_project(
         recipient_id, settings.ig_account_map(), DEFAULT_INSTAGRAM_PROJECT
     )
-    conversation = get_or_create_conversation(
-        db, f"ig_{ig_id}", project, "instagram", contact_instagram=ig_id
-    )
-    # Si la persistencia del turno falla (p.ej. timeout de Claude, hipo de DB —más
-    # probable bajo ráfaga), liberamos el evento reclamado para que el reintento de Meta
-    # (mismo mid) lo vuelva a procesar. Sin esto el claim queda quemado y el inbound se
-    # PIERDE silenciosamente: medio turno persistido (user sin reply) y nunca contestado.
-    # El _deliver posterior NO libera: ahí el turno YA está persistido y reintentar
-    # duplicaría el turno; el fallo de envío se trata aparte (reintento fuera de banda).
+    # get_or_create_conversation + la persistencia del turno van DENTRO del try: si algo
+    # falla tras reclamar el evento (p.ej. timeout de pool en get_or_create bajo ráfaga, o
+    # timeout de Claude en record_turn), liberamos el evento reclamado para que el reintento
+    # de Meta (mismo mid) lo reprocese. Sin esto el claim queda quemado y el inbound se PIERDE
+    # silenciosamente: el lead nunca es contestado. El _deliver posterior NO libera: ahí el
+    # turno YA está persistido y reintentar lo duplicaría; el fallo de envío se trata aparte.
     #
     # TRADE-OFF CONOCIDO (duplicación del Message de usuario): igual que en WhatsApp
     # (_handle_change). record_turn commitea el Message del usuario ANTES del await a Claude,
@@ -329,6 +333,9 @@ async def _handle_ig_event(db: Session, event: dict):
     # una sola vez). Se acepta: mejor duplicar el mensaje del usuario que PERDER el lead.
     # test_concurrency lo documenta (test_instagram_transient_failure_duplicates_user_message).
     try:
+        conversation = get_or_create_conversation(
+            db, f"ig_{ig_id}", project, "instagram", contact_instagram=ig_id
+        )
         response_text = await record_turn(db, conversation, text)
     except Exception:
         db.rollback()
@@ -337,71 +344,87 @@ async def _handle_ig_event(db: Session, event: dict):
     await _deliver(send_instagram_message(ig_id, response_text), "instagram", conversation.id)
 
 
+async def _handle_wa_message(db: Session, msg: dict) -> None:
+    """Procesa UN mensaje de WhatsApp: valida, reclama (idempotencia), persiste el turno y
+    responde. Si algo falla tras reclamar, libera el evento y RE-LANZA para que el llamador
+    lo aísle y loguee (y el reintento de Meta, si llega, lo reprocese)."""
+    if msg.get("type") != "text":
+        return
+    text = (msg.get("text") or {}).get("body")
+    if not text:
+        return
+    phone = msg.get("from")
+    if not phone:
+        return
+    # Reclamar DESPUÉS de validar 'from': si reclamáramos antes y faltara,
+    # un reintento válido de Meta (mismo wamid) quedaría descartado.
+    wamid = msg.get("id")
+    event_id = f"wa_{wamid}" if wamid else ""
+    if not _claim_event(db, event_id):
+        return
+    project = _resolve_project(phone, settings.wa_number_map(), DEFAULT_WHATSAPP_PROJECT)
+    # get_or_create_conversation, las mutaciones del inbound y la persistencia del
+    # turno van DENTRO del try: si algo falla tras reclamar el evento (timeout de pool
+    # en get_or_create bajo ráfaga, timeout de Claude en record_turn), liberamos el
+    # evento reclamado para que el reintento de Meta (mismo wamid) lo reprocese. Sin
+    # esto el claim queda quemado y el inbound se PIERDE: el lead nunca es contestado.
+    # El _deliver posterior NO libera (ahí el turno ya está persistido; reintentar lo
+    # duplicaría).
+    #
+    # TRADE-OFF CONOCIDO (duplicación del Message de usuario): record_turn commitea el
+    # Message del usuario ANTES del await a Claude (conversation_service.record_turn),
+    # así que cuando Claude falla ese mensaje YA está persistido y el db.rollback() de
+    # acá no lo revierte (fue otra transacción). El reintento de Meta vuelve a insertar
+    # un Message de usuario idéntico → el inbound queda DUPLICADO (la respuesta del
+    # asistente, en cambio, se persiste una sola vez, en el intento exitoso). Se acepta:
+    # mejor duplicar el mensaje del usuario que PERDER el lead. Deduplicarlo prolijamente
+    # exigiría un id externo (wamid) en Message —columna + migración + cambio de firma de
+    # record_turn—, fuera del alcance de este fix. test_concurrency lo documenta como
+    # comportamiento esperado (test_whatsapp_transient_failure_duplicates_user_message).
+    try:
+        conversation = get_or_create_conversation(
+            db, f"wa_{phone}", project, "whatsapp", contact_phone=phone
+        )
+        # Marcar el inbound: reabre la ventana de servicio de 24h. Naive UTC para
+        # igualar las columnas DateTime del modelo. Se persiste con el turno (record_turn
+        # commitea) para que un envío proactivo posterior sepa si la ventana sigue abierta.
+        conversation.last_inbound_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        # Opt-out de re-engagement: si el lead pide la baja (BAJA/STOP/CANCELAR…), marcarlo
+        # para que el selector proactivo no le vuelva a escribir. Additivo: NO corta el flujo
+        # —se sigue respondiendo este turno normalmente— y se persiste con el commit de
+        # record_turn (mismo turno, sin commit extra en el hot path).
+        if not conversation.reengage_opt_out and _is_optout_message(text):
+            conversation.reengage_opt_out = True
+            logger.info("Re-engagement opt-out registrado (conversation=%s)", conversation.id)
+        response_text = await record_turn(db, conversation, text)
+    except Exception:
+        db.rollback()
+        _release_event(db, event_id)
+        raise
+    # Ruteo por ventana: con el inbound recién registrado la ventana está abierta,
+    # así que esta respuesta sale free-form. send_whatsapp_reply centraliza la
+    # decisión (abierta → free-form / cerrada → plantilla) para los envíos proactivos.
+    await _deliver(
+        send_whatsapp_reply(phone, response_text, conversation.last_inbound_at),
+        "whatsapp",
+        conversation.id,
+    )
+
+
 async def _handle_change(db: Session, change: dict):
     field = change.get("field")
     value = change.get("value", {})
 
     if field == "messages":
+        # Un lote de WhatsApp puede traer VARIOS mensajes; cada uno se procesa AISLADO para
+        # que un fallo en uno no aborte los hermanos del mismo lote (Meta responde 200 al
+        # toque y no reintenta el lote). El handler ya liberó su claim antes de propagar.
         for msg in value.get("messages", []):
-            if msg.get("type") != "text":
-                continue
-            text = (msg.get("text") or {}).get("body")
-            if not text:
-                continue
-            phone = msg.get("from")
-            if not phone:
-                continue
-            # Reclamar DESPUÉS de validar 'from': si reclamáramos antes y faltara,
-            # un reintento válido de Meta (mismo wamid) quedaría descartado.
-            wamid = msg.get("id")
-            event_id = f"wa_{wamid}" if wamid else ""
-            if not _claim_event(db, event_id):
-                continue
-            project = _resolve_project(phone, settings.wa_number_map(), DEFAULT_WHATSAPP_PROJECT)
-            conversation = get_or_create_conversation(
-                db, f"wa_{phone}", project, "whatsapp", contact_phone=phone
-            )
-            # Marcar el inbound: reabre la ventana de servicio de 24h. Naive UTC para
-            # igualar las columnas DateTime del modelo. Se persiste con el turno (record_turn
-            # commitea) para que un envío proactivo posterior sepa si la ventana sigue abierta.
-            conversation.last_inbound_at = datetime.now(timezone.utc).replace(tzinfo=None)
-            # Opt-out de re-engagement: si el lead pide la baja (BAJA/STOP/CANCELAR…), marcarlo
-            # para que el selector proactivo no le vuelva a escribir. Additivo: NO corta el flujo
-            # —se sigue respondiendo este turno normalmente— y se persiste con el commit de
-            # record_turn (mismo turno, sin commit extra en el hot path).
-            if not conversation.reengage_opt_out and _is_optout_message(text):
-                conversation.reengage_opt_out = True
-                logger.info("Re-engagement opt-out registrado (conversation=%s)", conversation.id)
-            # Si la persistencia del turno falla (timeout de Claude, hipo de DB —más probable
-            # bajo ráfaga), liberar el evento reclamado para que el reintento de Meta (mismo
-            # wamid) lo reprocese. Sin esto el claim queda quemado y el inbound se PIERDE:
-            # medio turno persistido (user sin reply) y el lead nunca contestado. El _deliver
-            # posterior NO libera (ahí el turno ya está persistido; reintentar lo duplicaría).
-            #
-            # TRADE-OFF CONOCIDO (duplicación del Message de usuario): record_turn commitea el
-            # Message del usuario ANTES del await a Claude (conversation_service.record_turn),
-            # así que cuando Claude falla ese mensaje YA está persistido y el db.rollback() de
-            # acá no lo revierte (fue otra transacción). El reintento de Meta vuelve a insertar
-            # un Message de usuario idéntico → el inbound queda DUPLICADO (la respuesta del
-            # asistente, en cambio, se persiste una sola vez, en el intento exitoso). Se acepta:
-            # mejor duplicar el mensaje del usuario que PERDER el lead. Deduplicarlo prolijamente
-            # exigiría un id externo (wamid) en Message —columna + migración + cambio de firma de
-            # record_turn—, fuera del alcance de este fix. test_concurrency lo documenta como
-            # comportamiento esperado (test_whatsapp_transient_failure_duplicates_user_message).
             try:
-                response_text = await record_turn(db, conversation, text)
-            except Exception:
+                await _handle_wa_message(db, msg)
+            except Exception as exc:
                 db.rollback()
-                _release_event(db, event_id)
-                raise
-            # Ruteo por ventana: con el inbound recién registrado la ventana está abierta,
-            # así que esta respuesta sale free-form. send_whatsapp_reply centraliza la
-            # decisión (abierta → free-form / cerrada → plantilla) para los envíos proactivos.
-            await _deliver(
-                send_whatsapp_reply(phone, response_text, conversation.last_inbound_at),
-                "whatsapp",
-                conversation.id,
-            )
+                _log_event_failure(exc, "webhook._handle_wa_message")
 
     elif field == "leadgen":
         await _handle_lead_ad(db, value)
@@ -426,43 +449,47 @@ async def _handle_lead_ad(db: Session, value: dict):
     if not _claim_event(db, event_id):
         return
 
-    conversation = get_or_create_conversation(db, f"lead_{leadgen_id}", project, "lead_ad")
-    conversation.status = "hot"
-
-    name = fields.get("full_name") or fields.get("name")
-    email = fields.get("email")
-    phone = fields.get("phone_number") or fields.get("phone")
-
-    conversation.contact_name = name
-    conversation.contact_email = email
-    conversation.contact_phone = phone
-
-    lead = conversation.lead
-    if not lead:
-        lead = Lead(conversation_id=conversation.id, project=project)
-        db.add(lead)
-    lead.name = name
-    lead.email = email
-    lead.phone = phone
-    # interests como lista de strings "campo: valor": el panel lo renderiza como tags
-    # (.length/.map). Guardar el dict crudo hacía que nunca aparecieran las tags.
-    # Excluir los campos de contacto (ya van en name/email/phone): si no, se duplicaban
-    # como tags (full_name, name, email, phone_number, phone).
-    lead.interests = [
-        f"{k}: {v}"
-        for k, v in fields.items()
-        if k not in _LEAD_CONTACT_FIELDS
-    ]
-    lead.status = "new"
-    lead.notes = f"Vino de Lead Ad (form {form_id}, ad {value.get('ad_id', '?')})"
-
+    # TODO lo posterior al claim va en el try: cualquier fallo (no solo IntegrityError)
+    # debe LIBERAR el ProcessedEvent, o el reintento de Meta ve el evento reclamado y
+    # descarta el lead PAGO para siempre. El punto más frágil es get_or_create_conversation
+    # bajo ráfaga de campaña (timeout de pool / OperationalError) — justo cuando llegan los
+    # lead ads. Antes solo se cubría el IntegrityError del commit final, así que un pool
+    # timeout u otro error transitorio quemaba el claim en silencio.
     try:
+        conversation = get_or_create_conversation(db, f"lead_{leadgen_id}", project, "lead_ad")
+        conversation.status = "hot"
+
+        name = fields.get("full_name") or fields.get("name")
+        email = fields.get("email")
+        phone = fields.get("phone_number") or fields.get("phone")
+
+        conversation.contact_name = name
+        conversation.contact_email = email
+        conversation.contact_phone = phone
+
+        lead = conversation.lead
+        if not lead:
+            lead = Lead(conversation_id=conversation.id, project=project)
+            db.add(lead)
+        lead.name = name
+        lead.email = email
+        lead.phone = phone
+        # interests como lista de strings "campo: valor": el panel lo renderiza como tags
+        # (.length/.map). Guardar el dict crudo hacía que nunca aparecieran las tags.
+        # Excluir los campos de contacto (ya van en name/email/phone): si no, se duplicaban
+        # como tags (full_name, name, email, phone_number, phone).
+        lead.interests = [
+            f"{k}: {v}"
+            for k, v in fields.items()
+            if k not in _LEAD_CONTACT_FIELDS
+        ]
+        lead.status = "new"
+        lead.notes = f"Vino de Lead Ad (form {form_id}, ad {value.get('ad_id', '?')})"
+
         db.commit()
-    except IntegrityError as exc:
-        # Falló la persistencia del Lead: liberar el ProcessedEvent reclamado para que
-        # un reintento de Meta pueda volver a procesar (si no, el lead se perdería).
+    except Exception as exc:
         db.rollback()
-        logger.exception("IntegrityError guardando Lead Ad (project=%s)", project)
+        logger.exception("Falló la persistencia del Lead Ad (project=%s)", project)
         record_error(
             "webhook._handle_lead_ad", exc, project=project, leadgen_id=str(leadgen_id)
         )

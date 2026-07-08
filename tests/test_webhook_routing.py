@@ -486,6 +486,76 @@ def test_handle_lead_ad_releases_event_when_get_or_create_fails(fresh_db, monkey
     assert _counts()["events"] == 0  # claim liberado
 
 
+# ───────────────────────── batch isolation: un fallo no aborta hermanos ────
+
+def test_failing_message_does_not_abort_siblings_in_change(fresh_db, monkeypatch):
+    """Batch isolation por-mensaje: si un mensaje del lote falla (p.ej. Claude timeout), los
+    HERMANOS del mismo change se siguen procesando. Antes un fallo abortaba el lote entero.
+    Regresión de la auditoría 2026-07-08."""
+    async def flaky_ai(project, cfg, message, history):
+        if message == "rompo":
+            raise RuntimeError("Claude timeout (transitorio)")
+        return "respuesta"
+
+    sent = []
+
+    async def capture(phone, text, *a, **k):
+        sent.append((phone, text))
+
+    monkeypatch.setattr(convsvc, "get_ai_response", flaky_ai)
+    monkeypatch.setattr(webhook, "send_whatsapp_reply", capture)
+
+    change = {"field": "messages", "value": {"messages": [
+        {"id": "wamid_fail", "type": "text", "from": "5491100000001", "text": {"body": "rompo"}},
+        {"id": "wamid_ok", "type": "text", "from": "5491100000002", "text": {"body": "hola"}},
+    ]}}
+    db = database.SessionLocal()
+    try:
+        asyncio.run(webhook._handle_change(db, change))
+    finally:
+        db.close()
+
+    # El 2º mensaje se procesó pese al fallo del 1º.
+    assert ("5491100000002", "respuesta") in sent
+    db = database.SessionLocal()
+    try:
+        assert db.query(models.ProcessedEvent).filter_by(event_id="wa_wamid_ok").count() == 1
+        # El que falló liberó su claim (retry-able).
+        assert db.query(models.ProcessedEvent).filter_by(event_id="wa_wamid_fail").count() == 0
+        assert db.query(models.Conversation).filter_by(session_id="wa_5491100000002").first() is not None
+    finally:
+        db.close()
+
+
+def test_failing_event_does_not_abort_later_events(fresh_db, monkeypatch):
+    """Batch isolation por-evento (_process_event): un evento (IG) que falla no impide
+    procesar el evento hermano (WA) de la MISMA entrega del webhook."""
+    async def flaky_ai(project, cfg, message, history):
+        if message == "ig-rompe":
+            raise RuntimeError("Claude timeout (transitorio)")
+        return "respuesta"
+
+    monkeypatch.setattr(convsvc, "get_ai_response", flaky_ai)
+
+    body = {"entry": [{
+        "messaging": [{"sender": {"id": "IGX"}, "message": {"mid": "m_ig", "text": "ig-rompe"}}],
+        "changes": [{"field": "messages", "value": {"messages": [
+            {"id": "w_ok", "type": "text", "from": "5491100000003", "text": {"body": "hola"}},
+        ]}}],
+    }]}
+    asyncio.run(webhook._process_event(body))
+
+    db = database.SessionLocal()
+    try:
+        # El WA se procesó pese al fallo del IG.
+        assert db.query(models.Conversation).filter_by(session_id="wa_5491100000003").first() is not None
+        assert db.query(models.ProcessedEvent).filter_by(event_id="wa_w_ok").count() == 1
+        # El IG que falló liberó su claim (retry-able).
+        assert db.query(models.ProcessedEvent).filter_by(event_id="ig_m_ig").count() == 0
+    finally:
+        db.close()
+
+
 # ───────────────────────── _claim_event: referencia fuerte a la purga ───────
 
 def test_claim_event_retiene_referencia_fuerte_a_la_task_de_purga(fresh_db, monkeypatch):

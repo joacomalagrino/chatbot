@@ -357,6 +357,64 @@ def test_instagram_transient_failure_duplicates_user_message(fresh_db, monkeypat
         db.close()
 
 
+def test_whatsapp_get_or_create_failure_releases_claim(fresh_db, monkeypatch):
+    """get_or_create_conversation corre tras el claim; antes del fix quedaba FUERA del try
+    que libera, así que un timeout de pool ahí (bajo ráfaga) quemaba el claim y perdía el
+    inbound. Ahora se libera → el reintento de Meta puede recuperar. Regresión 2026-07-08."""
+    from sqlalchemy.exc import OperationalError
+
+    def boom(*a, **k):
+        raise OperationalError("forced", None, Exception("pool timeout en get_or_create"))
+
+    monkeypatch.setattr(webhook, "get_or_create_conversation", boom)
+
+    body = {
+        "entry": [{
+            "changes": [{
+                "field": "messages",
+                "value": {"messages": [{
+                    "id": "wamid_goc", "type": "text",
+                    "from": "5491100000000", "text": {"body": "hola"},
+                }]},
+            }],
+        }],
+    }
+    # _process_event traga el re-raise en su except global; el claim ya se liberó.
+    asyncio.run(webhook._process_event(body))
+
+    db = database.SessionLocal()
+    try:
+        assert db.query(models.ProcessedEvent).count() == 0   # claim liberado
+    finally:
+        db.close()
+
+
+def test_instagram_get_or_create_failure_releases_claim(fresh_db, monkeypatch):
+    """Mismo contrato que WhatsApp pero por Instagram (_handle_ig_event)."""
+    from sqlalchemy.exc import OperationalError
+
+    def boom(*a, **k):
+        raise OperationalError("forced", None, Exception("pool timeout en get_or_create"))
+
+    monkeypatch.setattr(webhook, "get_or_create_conversation", boom)
+
+    body = {
+        "entry": [{
+            "messaging": [{
+                "sender": {"id": "ig_user_goc"},
+                "message": {"mid": "mid_goc", "text": "hola"},
+            }],
+        }],
+    }
+    asyncio.run(webhook._process_event(body))
+
+    db = database.SessionLocal()
+    try:
+        assert db.query(models.ProcessedEvent).count() == 0   # claim liberado
+    finally:
+        db.close()
+
+
 def test_concurrent_lead_creation_same_conversation_is_handled(fresh_db, monkeypatch):
     """Dos turnos casi simultáneos de la MISMA conversación, cada uno detectando un dato de
     contacto distinto: ambos ven conversation.lead is None y crean Lead(conversation_id=...).

@@ -16,7 +16,7 @@ Se stubea Claude y Meta (no hay red). Cada test usa su propia sesión contra la 
 import asyncio
 
 import pytest
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 import database
 import models
@@ -427,6 +427,63 @@ def test_handle_lead_ad_releases_event_when_persist_fails(fresh_db, monkeypatch)
     c = _counts()
     assert c["leads"] == 0
     assert c["events"] == 0
+
+
+def test_handle_lead_ad_releases_event_on_non_integrity_error(fresh_db, monkeypatch):
+    """El claim se libera ante CUALQUIER fallo tras reclamar, no solo IntegrityError.
+    Un OperationalError en el commit del Lead (timeout de pool bajo ráfaga de campaña,
+    el modo de fallo #1) antes NO se capturaba → el claim quedaba quemado y el lead PAGO
+    se perdía para siempre. Regresión del fix de la auditoría 2026-07-08."""
+    async def fake_lead(leadgen_id):
+        return {"field_data": [{"name": "full_name", "values": ["Falla"]}]}
+
+    monkeypatch.setattr(webhook, "get_lead_data", fake_lead)
+    monkeypatch.setattr(webhook, "fire_hot_lead", lambda payload: None)
+
+    db = database.SessionLocal()
+    original_commit = db.commit
+
+    def flaky_commit():
+        if any(isinstance(obj, models.Lead) for obj in db.new):
+            raise OperationalError("forced", None, Exception("pool timeout"))
+        return original_commit()
+
+    db.commit = flaky_commit
+    try:
+        asyncio.run(webhook._handle_lead_ad(db, {"leadgen_id": "333", "form_id": "F1"}))
+    finally:
+        db.commit = original_commit
+        db.close()
+
+    # El claim se liberó (Meta puede reintentar) y no quedó Lead a medias.
+    c = _counts()
+    assert c["leads"] == 0
+    assert c["events"] == 0
+
+
+def test_handle_lead_ad_releases_event_when_get_or_create_fails(fresh_db, monkeypatch):
+    """get_or_create_conversation corre DESPUÉS del claim; antes del fix quedaba fuera de
+    todo try, así que un timeout de pool ahí (bajo ráfaga) quemaba el claim y perdía el lead.
+    Ahora está dentro del try que libera → Meta puede reintentar."""
+    async def fake_lead(leadgen_id):
+        return {"field_data": [{"name": "full_name", "values": ["X"]}]}
+
+    monkeypatch.setattr(webhook, "get_lead_data", fake_lead)
+    monkeypatch.setattr(webhook, "fire_hot_lead", lambda payload: None)
+
+    def boom(*a, **k):
+        raise OperationalError("forced", None, Exception("pool timeout en get_or_create"))
+
+    monkeypatch.setattr(webhook, "get_or_create_conversation", boom)
+
+    db = database.SessionLocal()
+    try:
+        # No debe propagar: el handler captura, libera y retorna.
+        asyncio.run(webhook._handle_lead_ad(db, {"leadgen_id": "444", "form_id": "F1"}))
+    finally:
+        db.close()
+
+    assert _counts()["events"] == 0  # claim liberado
 
 
 # ───────────────────────── _claim_event: referencia fuerte a la purga ───────

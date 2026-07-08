@@ -312,15 +312,12 @@ async def _handle_ig_event(db: Session, event: dict):
     project = _resolve_project(
         recipient_id, settings.ig_account_map(), DEFAULT_INSTAGRAM_PROJECT
     )
-    conversation = get_or_create_conversation(
-        db, f"ig_{ig_id}", project, "instagram", contact_instagram=ig_id
-    )
-    # Si la persistencia del turno falla (p.ej. timeout de Claude, hipo de DB —más
-    # probable bajo ráfaga), liberamos el evento reclamado para que el reintento de Meta
-    # (mismo mid) lo vuelva a procesar. Sin esto el claim queda quemado y el inbound se
-    # PIERDE silenciosamente: medio turno persistido (user sin reply) y nunca contestado.
-    # El _deliver posterior NO libera: ahí el turno YA está persistido y reintentar
-    # duplicaría el turno; el fallo de envío se trata aparte (reintento fuera de banda).
+    # get_or_create_conversation + la persistencia del turno van DENTRO del try: si algo
+    # falla tras reclamar el evento (p.ej. timeout de pool en get_or_create bajo ráfaga, o
+    # timeout de Claude en record_turn), liberamos el evento reclamado para que el reintento
+    # de Meta (mismo mid) lo reprocese. Sin esto el claim queda quemado y el inbound se PIERDE
+    # silenciosamente: el lead nunca es contestado. El _deliver posterior NO libera: ahí el
+    # turno YA está persistido y reintentar lo duplicaría; el fallo de envío se trata aparte.
     #
     # TRADE-OFF CONOCIDO (duplicación del Message de usuario): igual que en WhatsApp
     # (_handle_change). record_turn commitea el Message del usuario ANTES del await a Claude,
@@ -329,6 +326,9 @@ async def _handle_ig_event(db: Session, event: dict):
     # una sola vez). Se acepta: mejor duplicar el mensaje del usuario que PERDER el lead.
     # test_concurrency lo documenta (test_instagram_transient_failure_duplicates_user_message).
     try:
+        conversation = get_or_create_conversation(
+            db, f"ig_{ig_id}", project, "instagram", contact_instagram=ig_id
+        )
         response_text = await record_turn(db, conversation, text)
     except Exception:
         db.rollback()
@@ -358,25 +358,13 @@ async def _handle_change(db: Session, change: dict):
             if not _claim_event(db, event_id):
                 continue
             project = _resolve_project(phone, settings.wa_number_map(), DEFAULT_WHATSAPP_PROJECT)
-            conversation = get_or_create_conversation(
-                db, f"wa_{phone}", project, "whatsapp", contact_phone=phone
-            )
-            # Marcar el inbound: reabre la ventana de servicio de 24h. Naive UTC para
-            # igualar las columnas DateTime del modelo. Se persiste con el turno (record_turn
-            # commitea) para que un envío proactivo posterior sepa si la ventana sigue abierta.
-            conversation.last_inbound_at = datetime.now(timezone.utc).replace(tzinfo=None)
-            # Opt-out de re-engagement: si el lead pide la baja (BAJA/STOP/CANCELAR…), marcarlo
-            # para que el selector proactivo no le vuelva a escribir. Additivo: NO corta el flujo
-            # —se sigue respondiendo este turno normalmente— y se persiste con el commit de
-            # record_turn (mismo turno, sin commit extra en el hot path).
-            if not conversation.reengage_opt_out and _is_optout_message(text):
-                conversation.reengage_opt_out = True
-                logger.info("Re-engagement opt-out registrado (conversation=%s)", conversation.id)
-            # Si la persistencia del turno falla (timeout de Claude, hipo de DB —más probable
-            # bajo ráfaga), liberar el evento reclamado para que el reintento de Meta (mismo
-            # wamid) lo reprocese. Sin esto el claim queda quemado y el inbound se PIERDE:
-            # medio turno persistido (user sin reply) y el lead nunca contestado. El _deliver
-            # posterior NO libera (ahí el turno ya está persistido; reintentar lo duplicaría).
+            # get_or_create_conversation, las mutaciones del inbound y la persistencia del
+            # turno van DENTRO del try: si algo falla tras reclamar el evento (timeout de pool
+            # en get_or_create bajo ráfaga, timeout de Claude en record_turn), liberamos el
+            # evento reclamado para que el reintento de Meta (mismo wamid) lo reprocese. Sin
+            # esto el claim queda quemado y el inbound se PIERDE: el lead nunca es contestado.
+            # El _deliver posterior NO libera (ahí el turno ya está persistido; reintentar lo
+            # duplicaría).
             #
             # TRADE-OFF CONOCIDO (duplicación del Message de usuario): record_turn commitea el
             # Message del usuario ANTES del await a Claude (conversation_service.record_turn),
@@ -389,6 +377,20 @@ async def _handle_change(db: Session, change: dict):
             # record_turn—, fuera del alcance de este fix. test_concurrency lo documenta como
             # comportamiento esperado (test_whatsapp_transient_failure_duplicates_user_message).
             try:
+                conversation = get_or_create_conversation(
+                    db, f"wa_{phone}", project, "whatsapp", contact_phone=phone
+                )
+                # Marcar el inbound: reabre la ventana de servicio de 24h. Naive UTC para
+                # igualar las columnas DateTime del modelo. Se persiste con el turno (record_turn
+                # commitea) para que un envío proactivo posterior sepa si la ventana sigue abierta.
+                conversation.last_inbound_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                # Opt-out de re-engagement: si el lead pide la baja (BAJA/STOP/CANCELAR…), marcarlo
+                # para que el selector proactivo no le vuelva a escribir. Additivo: NO corta el flujo
+                # —se sigue respondiendo este turno normalmente— y se persiste con el commit de
+                # record_turn (mismo turno, sin commit extra en el hot path).
+                if not conversation.reengage_opt_out and _is_optout_message(text):
+                    conversation.reengage_opt_out = True
+                    logger.info("Re-engagement opt-out registrado (conversation=%s)", conversation.id)
                 response_text = await record_turn(db, conversation, text)
             except Exception:
                 db.rollback()
@@ -426,43 +428,47 @@ async def _handle_lead_ad(db: Session, value: dict):
     if not _claim_event(db, event_id):
         return
 
-    conversation = get_or_create_conversation(db, f"lead_{leadgen_id}", project, "lead_ad")
-    conversation.status = "hot"
-
-    name = fields.get("full_name") or fields.get("name")
-    email = fields.get("email")
-    phone = fields.get("phone_number") or fields.get("phone")
-
-    conversation.contact_name = name
-    conversation.contact_email = email
-    conversation.contact_phone = phone
-
-    lead = conversation.lead
-    if not lead:
-        lead = Lead(conversation_id=conversation.id, project=project)
-        db.add(lead)
-    lead.name = name
-    lead.email = email
-    lead.phone = phone
-    # interests como lista de strings "campo: valor": el panel lo renderiza como tags
-    # (.length/.map). Guardar el dict crudo hacía que nunca aparecieran las tags.
-    # Excluir los campos de contacto (ya van en name/email/phone): si no, se duplicaban
-    # como tags (full_name, name, email, phone_number, phone).
-    lead.interests = [
-        f"{k}: {v}"
-        for k, v in fields.items()
-        if k not in _LEAD_CONTACT_FIELDS
-    ]
-    lead.status = "new"
-    lead.notes = f"Vino de Lead Ad (form {form_id}, ad {value.get('ad_id', '?')})"
-
+    # TODO lo posterior al claim va en el try: cualquier fallo (no solo IntegrityError)
+    # debe LIBERAR el ProcessedEvent, o el reintento de Meta ve el evento reclamado y
+    # descarta el lead PAGO para siempre. El punto más frágil es get_or_create_conversation
+    # bajo ráfaga de campaña (timeout de pool / OperationalError) — justo cuando llegan los
+    # lead ads. Antes solo se cubría el IntegrityError del commit final, así que un pool
+    # timeout u otro error transitorio quemaba el claim en silencio.
     try:
+        conversation = get_or_create_conversation(db, f"lead_{leadgen_id}", project, "lead_ad")
+        conversation.status = "hot"
+
+        name = fields.get("full_name") or fields.get("name")
+        email = fields.get("email")
+        phone = fields.get("phone_number") or fields.get("phone")
+
+        conversation.contact_name = name
+        conversation.contact_email = email
+        conversation.contact_phone = phone
+
+        lead = conversation.lead
+        if not lead:
+            lead = Lead(conversation_id=conversation.id, project=project)
+            db.add(lead)
+        lead.name = name
+        lead.email = email
+        lead.phone = phone
+        # interests como lista de strings "campo: valor": el panel lo renderiza como tags
+        # (.length/.map). Guardar el dict crudo hacía que nunca aparecieran las tags.
+        # Excluir los campos de contacto (ya van en name/email/phone): si no, se duplicaban
+        # como tags (full_name, name, email, phone_number, phone).
+        lead.interests = [
+            f"{k}: {v}"
+            for k, v in fields.items()
+            if k not in _LEAD_CONTACT_FIELDS
+        ]
+        lead.status = "new"
+        lead.notes = f"Vino de Lead Ad (form {form_id}, ad {value.get('ad_id', '?')})"
+
         db.commit()
-    except IntegrityError as exc:
-        # Falló la persistencia del Lead: liberar el ProcessedEvent reclamado para que
-        # un reintento de Meta pueda volver a procesar (si no, el lead se perdería).
+    except Exception as exc:
         db.rollback()
-        logger.exception("IntegrityError guardando Lead Ad (project=%s)", project)
+        logger.exception("Falló la persistencia del Lead Ad (project=%s)", project)
         record_error(
             "webhook._handle_lead_ad", exc, project=project, leadgen_id=str(leadgen_id)
         )

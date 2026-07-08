@@ -17,6 +17,21 @@ logger = logging.getLogger(__name__)
 MAX_MESSAGE_CHARS = 4000     # cota del mensaje del usuario (el widget ya lo hace a 2000; el webhook no)
 MAX_HISTORY_MESSAGES = 40    # cuántos mensajes traer para el historial (claude_service recorta a 20)
 
+# Prefijos de session_id RESERVADOS para los canales entrantes de Meta (webhook):
+#   wa_<telefono>  ig_<igsid>  lead_<leadgen_id>
+# La conversación se resuelve SOLO por session_id (columna unique global), y esos
+# ids son enumerables (wa_<telefono>). El chat web es público y sin auth, así que
+# si un cliente web pudiera pasar session_id="wa_<telefono>" se adjuntaría a la
+# conversación real de ese lead y leería su historial (PII) o la envenenaría: IDOR.
+# Por eso /chat rechaza estos prefijos (ver routers/chat.py). Fuente de verdad
+# única: si el webhook agrega un canal nuevo, sumá su prefijo acá.
+RESERVED_SESSION_PREFIXES = ("wa_", "ig_", "lead_")
+
+
+def is_reserved_session_id(session_id: str) -> bool:
+    """¿El session_id cae en un espacio reservado a los canales entrantes de Meta?"""
+    return session_id.startswith(RESERVED_SESSION_PREFIXES)
+
 
 def get_or_create_conversation(
     db: Session, session_id: str, project: str, channel: str, **contacts

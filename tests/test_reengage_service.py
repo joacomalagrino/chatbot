@@ -228,6 +228,24 @@ def test_failed_send_does_not_mark_reengaged(db, enable, monkeypatch):
     assert conv.reengaged_at is None
 
 
+def test_atomic_claim_skips_lead_reengaged_concurrently(db, sends, enable, monkeypatch):
+    # Carrera (TOCTOU): find_reengageable seleccionó el lead cuando reengaged_at era NULL,
+    # pero OTRO runner lo reclamó justo antes de que este mande. Simulamos devolviendo desde
+    # find un conv que YA tiene reengaged_at seteado: el UPDATE ... WHERE reengaged_at IS NULL
+    # debe dar rowcount 0 → NO se manda la plantilla (nada de doble envío) y sent=0.
+    already = _mk_conv(db, hours_ago=30, reengaged_at=NOW - timedelta(hours=1))
+    monkeypatch.setattr(
+        reengage, "find_reengageable_conversations", lambda *a, **k: [already]
+    )
+
+    result = asyncio.run(reengage.run_reengagement(db, now=NOW))
+
+    assert result == {"skipped": None, "selected": 1, "sent": 0, "failed": 0}
+    assert sends == []  # el claim atómico bloqueó el envío
+    db.refresh(already)
+    assert already.reengaged_at == NOW - timedelta(hours=1)  # no lo pisamos
+
+
 # ───────────────────────── endpoint /reengage/run (auth + trigger) ──────────
 
 @pytest.fixture()

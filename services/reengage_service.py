@@ -16,7 +16,7 @@ Meta y prenda el flag. Nunca se manda nada sin esas dos condiciones.
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import or_
+from sqlalchemy import or_, update
 from sqlalchemy.orm import Session
 
 from config import get_settings
@@ -112,24 +112,49 @@ async def run_reengagement(
     convs = find_reengageable_conversations(
         db, now=now, closing_within=closing_within, limit=limit
     )
+    # Capturamos (id, teléfono) ANTES de soltar la conexión: el commit de abajo expira los
+    # objetos ORM (expire_on_commit), y volver a leer conv.contact_phone re-selectaría —
+    # tomando conexión justo antes del await. La lista de tuplas no depende de la sesión.
+    targets = [(c.id, c.contact_phone) for c in convs]
+    selected = len(targets)
+    # Cierra la transacción de lectura que dejó abierta find_...().all() → devuelve la
+    # conexión al pool para que NO quede idle-in-transaction durante los awaits a Graph.
+    db.commit()
+
     sent = 0
     failed = 0
-    for conv in convs:
-        try:
-            await send_whatsapp_template(conv.contact_phone, template, lang_code=lang)
-        except Exception as exc:
-            # Un fallo en un lead NO debe frenar al resto del batch ni quedar silencioso.
-            failed += 1
-            logger.warning("Re-engagement falló para conversación %s", conv.id)
-            record_error("reengage_service.send", exc, conversation_id=str(conv.id))
-            continue
-        # Marcar reengaged_at SOLO tras el envío exitoso (idempotencia): si falló, queda
-        # elegible para el próximo intento. Commit por lead para no perder los ya enviados
-        # si el proceso se corta a mitad de batch.
-        conv.reengaged_at = now
+    for conv_id, phone in targets:
+        # Claim ATÓMICO antes de mandar (arregla el TOCTOU): dos corridas solapadas del
+        # cron/endpoint seleccionan los mismos leads; el UPDATE ... WHERE reengaged_at IS NULL
+        # deja que solo UNA gane (rowcount 1) y la otra saltee (rowcount 0) → la plantilla
+        # nunca se manda dos veces. El commit del claim además suelta la conexión antes del await.
+        claimed = db.execute(
+            update(Conversation)
+            .where(Conversation.id == conv_id, Conversation.reengaged_at.is_(None))
+            .values(reengaged_at=now)
+        ).rowcount
         db.commit()
+        if not claimed:
+            # Otro runner ya lo reclamó entre la selección y ahora: no re-mandar.
+            continue
+        try:
+            await send_whatsapp_template(phone, template, lang_code=lang)
+        except Exception as exc:
+            # El envío falló → DEVOLVEMOS la elegibilidad (un-claim) para reintentar en la
+            # próxima corrida, preservando el "solo cuenta como enviado tras el éxito" del
+            # diseño original. Un fallo en un lead NO frena al resto ni queda silencioso.
+            db.execute(
+                update(Conversation)
+                .where(Conversation.id == conv_id)
+                .values(reengaged_at=None)
+            )
+            db.commit()
+            failed += 1
+            logger.warning("Re-engagement falló para conversación %s", conv_id)
+            record_error("reengage_service.send", exc, conversation_id=str(conv_id))
+            continue
         sent += 1
 
-    result = {"skipped": None, "selected": len(convs), "sent": sent, "failed": failed}
+    result = {"skipped": None, "selected": selected, "sent": sent, "failed": failed}
     logger.info("Re-engagement: %s", result)
     return result

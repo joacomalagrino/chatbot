@@ -145,15 +145,15 @@ def test_excepcion_en_background_se_loguea_y_se_registra(client, monkeypatch, ca
     # El webhook igual responde 200 (procesa en background); el fallo no debe romper la respuesta.
     assert r.status_code == 200
 
-    # Quedó logueado con contexto (el field del webhook).
-    assert any("Error procesando webhook Meta" in rec.message for rec in caplog.records)
+    # Quedó logueado con contexto (el handler que falló; cada evento se aísla).
+    assert any("Error procesando evento de webhook" in rec.message for rec in caplog.records)
 
-    # Y quedó en el registro de errores recientes.
+    # Y quedó en el registro de errores recientes, con el contexto del handler aislado.
     errs = observability.recent_errors()
-    assert any(e["context"] == "webhook._process_event" for e in errs)
-    rec = next(e for e in errs if e["context"] == "webhook._process_event")
+    assert any(e["context"] == "webhook._handle_change" for e in errs)
+    rec = next(e for e in errs if e["context"] == "webhook._handle_change")
     assert rec["error_type"] == "RuntimeError"
-    assert rec["details"] == {"fields": ["messages"]}
+    assert rec["details"] == {"field": "messages"}
 
 
 def test_fallo_de_envio_se_registra(client, monkeypatch):
@@ -223,7 +223,7 @@ def test_errors_endpoint_muestra_errores_registrados(client, monkeypatch):
     assert r.status_code == 200
     data = r.json()
     assert data["count"] >= 1
-    assert any(e["context"] == "webhook._process_event" for e in data["errors"])
+    assert any(e["context"] == "webhook._handle_change" for e in data["errors"])
 
 
 # ───────────────────── saturación del pool de DB (señal #1) ──────────────────

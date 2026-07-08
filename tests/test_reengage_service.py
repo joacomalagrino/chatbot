@@ -136,6 +136,50 @@ def test_sends_to_eligible_marks_and_is_idempotent(db, sends, enable):
     assert len(sends) == 1  # sigue siendo 1: no hubo segundo envío
 
 
+def test_no_double_send_when_second_run_interleaves(db, enable, monkeypatch):
+    """TOCTOU: si una 2ª corrida arranca mientras la 1ª está enviando (antes, se marcaba
+    reengaged_at RECIÉN tras el envío, así que ambas seleccionaban el mismo lead y lo
+    duplicaban). Con el claim atómico —marcar ANTES de enviar— la 2ª corrida ve el lead ya
+    reclamado y no lo re-manda. Regresión de la auditoría 2026-07-08."""
+    _mk_conv(db, phone="5491199999999", hours_ago=30)
+    sends = []
+
+    async def fake_send(phone, template_name, lang_code="es_AR", body_params=None):
+        sends.append(phone)
+        if len(sends) == 1:
+            # Simular una 2ª corrida CONCURRENTE (cron que reintenta / trigger manual) justo
+            # mientras la 1ª está en el envío. Usa su PROPIA sesión, como un request aparte.
+            db2 = database.SessionLocal()
+            try:
+                await reengage.run_reengagement(db2, now=NOW)
+            finally:
+                db2.close()
+        return {"messages": [{"id": "x"}]}
+
+    monkeypatch.setattr(reengage, "send_whatsapp_template", fake_send)
+    asyncio.run(reengage.run_reengagement(db, now=NOW))
+
+    # El lead recibió la plantilla UNA sola vez pese a las dos corridas solapadas.
+    assert sends.count("5491199999999") == 1
+
+
+def test_send_failure_reverts_claim_so_lead_stays_eligible(db, enable, monkeypatch):
+    """Si el envío falla DESPUÉS del claim atómico, se revierte reengaged_at → el lead queda
+    elegible para el próximo intento (no se pierde por haberlo marcado antes de enviar)."""
+    conv = _mk_conv(db, phone="5491188888888", hours_ago=30)
+
+    async def boom(phone, template_name, lang_code="es_AR", body_params=None):
+        raise RuntimeError("Meta caído")
+
+    monkeypatch.setattr(reengage, "send_whatsapp_template", boom)
+
+    result = asyncio.run(reengage.run_reengagement(db, now=NOW))
+    assert result["sent"] == 0 and result["failed"] == 1
+    db.expire_all()
+    reloaded = db.query(models.Conversation).filter_by(id=conv.id).first()
+    assert reloaded.reengaged_at is None  # claim revertido: sigue elegible
+
+
 def test_template_name_falls_back_to_whatsapp_reengage_template(db, sends, monkeypatch):
     # REENGAGE_TEMPLATE_NAME vacío pero WHATSAPP_REENGAGE_TEMPLATE seteada => se reusa esa.
     monkeypatch.setattr(reengage.settings, "reengage_enabled", True)

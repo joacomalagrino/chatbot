@@ -357,6 +357,97 @@ def test_instagram_transient_failure_duplicates_user_message(fresh_db, monkeypat
         db.close()
 
 
+def test_record_turn_releases_connection_during_claude_await(fresh_db, monkeypatch):
+    """La conexión del pool NO debe quedar tomada durante el await a Claude: si no, una
+    ráfaga concurrente satura el pool (10+20) — la 'señal #1'. Verificamos que DENTRO del
+    await no hay transacción abierta (conexión devuelta al pool). Regresión 2026-07-08."""
+    db = database.SessionLocal()
+    try:
+        conv = get_or_create_conversation(db, "s_release", "agencia", "web")
+
+        seen = {}
+
+        async def spy_ai(project, cfg, message, history):
+            seen["in_tx"] = db.in_transaction()
+            return "ok"
+
+        monkeypatch.setattr(convsvc, "get_ai_response", spy_ai)
+        asyncio.run(convsvc.record_turn(db, conv, "hola"))
+        assert seen["in_tx"] is False   # sin transacción abierta durante el await
+    finally:
+        db.close()
+
+
+def test_stream_turn_releases_connection_during_claude_await(fresh_db, monkeypatch):
+    """Igual que record_turn pero por el streaming (/chat/stream), que puede durar más."""
+    db = database.SessionLocal()
+    try:
+        conv = get_or_create_conversation(db, "s_stream_release", "agencia", "web")
+
+        seen = {}
+
+        async def spy_stream(project, cfg, message, history):
+            seen["in_tx"] = db.in_transaction()
+            for d in ["a", "b"]:
+                yield d
+
+        monkeypatch.setattr(convsvc, "stream_ai_response", spy_stream)
+
+        async def drain():
+            async for _ in convsvc.stream_turn(db, conv, "hola"):
+                pass
+
+        asyncio.run(drain())
+        assert seen["in_tx"] is False
+    finally:
+        db.close()
+
+
+def test_concurrent_lead_creation_same_conversation_is_handled(fresh_db, monkeypatch):
+    """Dos turnos casi simultáneos de la MISMA conversación, cada uno detectando un dato de
+    contacto distinto: ambos ven conversation.lead is None y crean Lead(conversation_id=...).
+    leads.conversation_id es UNIQUE → el commit perdedor choca con IntegrityError. El handler
+    debe reconciliar (releer el Lead ganador y reaplicar) en vez de tirar el merge / 500.
+
+    Verifica: sin errores, exactamente 1 Lead, y AMBOS datos de contacto mergeados (no se
+    pierde el del turno perdedor)."""
+    monkeypatch.setattr(lead_service, "fire_hot_lead", lambda s: None)
+
+    # Conversación creada una sola vez (la race que probamos es la del Lead, no la conv).
+    setup = database.SessionLocal()
+    conv = get_or_create_conversation(setup, "wa_leadrace", "agencia", "whatsapp", contact_phone=None)
+    conv_id = conv.id
+    setup.close()
+
+    messages = {
+        0: "mi mail es persona@ejemplo.com",
+        1: "mi tel es 1123456780",
+    }
+
+    def worker(i, barrier):
+        db = database.SessionLocal()
+        try:
+            c = db.get(models.Conversation, conv_id)
+            barrier.wait()
+            update_lead_from_message(db, c, messages[i])
+        finally:
+            db.close()
+
+    errors = _run_threads(worker, 2)
+    assert errors == [], errors
+
+    db = database.SessionLocal()
+    try:
+        leads = db.query(models.Lead).filter_by(conversation_id=conv_id).all()
+        assert len(leads) == 1, "la UNIQUE constraint debe dejar una sola fila"
+        lead = leads[0]
+        # El merge de ambos turnos sobrevive: ni el email ni el teléfono se perdieron.
+        assert lead.email == "persona@ejemplo.com"
+        assert lead.phone == "1123456780"
+    finally:
+        db.close()
+
+
 def test_whatsapp_get_or_create_failure_releases_claim(fresh_db, monkeypatch):
     """get_or_create_conversation corre tras el claim; antes del fix quedaba FUERA del try
     que libera, así que un timeout de pool ahí (bajo ráfaga) quemaba el claim y perdía el
@@ -411,50 +502,5 @@ def test_instagram_get_or_create_failure_releases_claim(fresh_db, monkeypatch):
     db = database.SessionLocal()
     try:
         assert db.query(models.ProcessedEvent).count() == 0   # claim liberado
-    finally:
-        db.close()
-
-
-def test_concurrent_lead_creation_same_conversation_is_handled(fresh_db, monkeypatch):
-    """Dos turnos casi simultáneos de la MISMA conversación, cada uno detectando un dato de
-    contacto distinto: ambos ven conversation.lead is None y crean Lead(conversation_id=...).
-    leads.conversation_id es UNIQUE → el commit perdedor choca con IntegrityError. El handler
-    debe reconciliar (releer el Lead ganador y reaplicar) en vez de tirar el merge / 500.
-
-    Verifica: sin errores, exactamente 1 Lead, y AMBOS datos de contacto mergeados (no se
-    pierde el del turno perdedor)."""
-    monkeypatch.setattr(lead_service, "fire_hot_lead", lambda s: None)
-
-    # Conversación creada una sola vez (la race que probamos es la del Lead, no la conv).
-    setup = database.SessionLocal()
-    conv = get_or_create_conversation(setup, "wa_leadrace", "agencia", "whatsapp", contact_phone=None)
-    conv_id = conv.id
-    setup.close()
-
-    messages = {
-        0: "mi mail es persona@ejemplo.com",
-        1: "mi tel es 1123456780",
-    }
-
-    def worker(i, barrier):
-        db = database.SessionLocal()
-        try:
-            c = db.get(models.Conversation, conv_id)
-            barrier.wait()
-            update_lead_from_message(db, c, messages[i])
-        finally:
-            db.close()
-
-    errors = _run_threads(worker, 2)
-    assert errors == [], errors
-
-    db = database.SessionLocal()
-    try:
-        leads = db.query(models.Lead).filter_by(conversation_id=conv_id).all()
-        assert len(leads) == 1, "la UNIQUE constraint debe dejar una sola fila"
-        lead = leads[0]
-        # El merge de ambos turnos sobrevive: ni el email ni el teléfono se perdieron.
-        assert lead.email == "persona@ejemplo.com"
-        assert lead.phone == "1123456780"
     finally:
         db.close()

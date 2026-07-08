@@ -13,6 +13,7 @@ from models import Message
 from ratelimit import limiter
 from services.conversation_service import (
     get_or_create_conversation,
+    is_reserved_session_id,
     record_turn,
     stream_turn,
 )
@@ -53,11 +54,23 @@ class ChatResponse(BaseModel):
     suggest_channels: bool = False
 
 
+def _reject_reserved_session(session_id: str) -> None:
+    """El chat web es PÚBLICO (sin auth) y el cliente elige su session_id. Los
+    canales entrantes de Meta usan session_id enumerables (wa_<telefono>, ig_<id>,
+    lead_<id>); sin este guard un cliente web podría pasar session_id="wa_<telefono>"
+    y adjuntarse a la conversación real de ese lead, leyendo su historial (PII) o
+    envenenándola: IDOR. Rechazamos uniformemente cualquier prefijo reservado (mismo
+    400 exista o no la conversación → sin oráculo de enumeración)."""
+    if is_reserved_session_id(session_id):
+        raise HTTPException(status_code=400, detail="session_id inválido")
+
+
 @router.post("/", response_model=ChatResponse)
 @limiter.limit("20/minute")
 async def chat(request: Request, payload: ChatRequest, db: Session = Depends(get_db)):
     if payload.project not in PROJECTS:
         raise HTTPException(status_code=400, detail=f"Proyecto inválido: {payload.project}")
+    _reject_reserved_session(payload.session_id)
 
     conversation = get_or_create_conversation(
         db, payload.session_id, payload.project, payload.channel
@@ -85,6 +98,7 @@ async def chat_stream(request: Request, payload: ChatRequest):
     (SessionLocal) y la cierra en finally —mismo patrón que _process_event en webhook.py."""
     if payload.project not in PROJECTS:
         raise HTTPException(status_code=400, detail=f"Proyecto inválido: {payload.project}")
+    _reject_reserved_session(payload.session_id)
 
     async def gen():
         db = SessionLocal()

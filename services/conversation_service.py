@@ -17,6 +17,21 @@ logger = logging.getLogger(__name__)
 MAX_MESSAGE_CHARS = 4000     # cota del mensaje del usuario (el widget ya lo hace a 2000; el webhook no)
 MAX_HISTORY_MESSAGES = 40    # cuántos mensajes traer para el historial (claude_service recorta a 20)
 
+# Prefijos de session_id RESERVADOS para los canales entrantes de Meta (webhook):
+#   wa_<telefono>  ig_<igsid>  lead_<leadgen_id>
+# La conversación se resuelve SOLO por session_id (columna unique global), y esos
+# ids son enumerables (wa_<telefono>). El chat web es público y sin auth, así que
+# si un cliente web pudiera pasar session_id="wa_<telefono>" se adjuntaría a la
+# conversación real de ese lead y leería su historial (PII) o la envenenaría: IDOR.
+# Por eso /chat rechaza estos prefijos (ver routers/chat.py). Fuente de verdad
+# única: si el webhook agrega un canal nuevo, sumá su prefijo acá.
+RESERVED_SESSION_PREFIXES = ("wa_", "ig_", "lead_")
+
+
+def is_reserved_session_id(session_id: str) -> bool:
+    """¿El session_id cae en un espacio reservado a los canales entrantes de Meta?"""
+    return session_id.startswith(RESERVED_SESSION_PREFIXES)
+
 
 def get_or_create_conversation(
     db: Session, session_id: str, project: str, channel: str, **contacts
@@ -77,11 +92,21 @@ async def record_turn(db: Session, conversation: Conversation, text: str) -> str
     recent.reverse()
     history = [{"role": m.role, "content": m.content} for m in recent]
 
-    response_text = await get_ai_response(
-        conversation.project, PROJECTS[conversation.project], text, history
-    )
+    # Capturar lo que necesita el await en locales y SOLTAR la conexión del pool antes de
+    # llamar a Claude: sin esto la conexión quedaba checked-out e idle-in-transaction durante
+    # todo el await (hasta ~60s: timeout 20s × 2 reintentos), así que ~30 turnos concurrentes
+    # en una ráfaga agotaban el pool (10+20) y el resto moría con "QueuePool limit reached"
+    # —la señal #1 que la app instrumenta, y que además quemaba claims del webhook—. El
+    # trabajo de DB del turno es de milisegundos; retener la conexión durante la latencia de
+    # Claude era una saturación autoinfligida. db.commit() cierra la transacción de lectura y
+    # devuelve la conexión al pool; el write posterior re-checkoutea por unos ms.
+    project = conversation.project
+    conversation_id = conversation.id
+    db.commit()
 
-    db.add(Message(conversation_id=conversation.id, role="assistant", content=response_text))
+    response_text = await get_ai_response(project, PROJECTS[project], text, history)
+
+    db.add(Message(conversation_id=conversation_id, role="assistant", content=response_text))
     db.commit()
 
     update_lead_from_message(db, conversation, text)
@@ -112,11 +137,15 @@ async def stream_turn(db: Session, conversation: Conversation, text: str):
     recent.reverse()
     history = [{"role": m.role, "content": m.content} for m in recent]
 
+    # Igual que record_turn: soltar la conexión del pool antes de streamear (puede durar
+    # incluso más que un turno normal). Ver el comentario allá.
+    project = conversation.project
+    conversation_id = conversation.id
+    db.commit()
+
     parts = []
     try:
-        async for delta in stream_ai_response(
-            conversation.project, PROJECTS[conversation.project], text, history
-        ):
+        async for delta in stream_ai_response(project, PROJECTS[project], text, history):
             parts.append(delta)
             yield delta
     finally:
@@ -126,7 +155,7 @@ async def stream_turn(db: Session, conversation: Conversation, text: str):
         response_text = "".join(parts)
         if response_text:
             db.add(
-                Message(conversation_id=conversation.id, role="assistant", content=response_text)
+                Message(conversation_id=conversation_id, role="assistant", content=response_text)
             )
             db.commit()
             update_lead_from_message(db, conversation, text)

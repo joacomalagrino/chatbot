@@ -357,6 +357,52 @@ def test_instagram_transient_failure_duplicates_user_message(fresh_db, monkeypat
         db.close()
 
 
+def test_record_turn_releases_connection_during_claude_await(fresh_db, monkeypatch):
+    """La conexión del pool NO debe quedar tomada durante el await a Claude: si no, una
+    ráfaga concurrente satura el pool (10+20) — la 'señal #1'. Verificamos que DENTRO del
+    await no hay transacción abierta (conexión devuelta al pool). Regresión 2026-07-08."""
+    db = database.SessionLocal()
+    try:
+        conv = get_or_create_conversation(db, "s_release", "agencia", "web")
+
+        seen = {}
+
+        async def spy_ai(project, cfg, message, history):
+            seen["in_tx"] = db.in_transaction()
+            return "ok"
+
+        monkeypatch.setattr(convsvc, "get_ai_response", spy_ai)
+        asyncio.run(convsvc.record_turn(db, conv, "hola"))
+        assert seen["in_tx"] is False   # sin transacción abierta durante el await
+    finally:
+        db.close()
+
+
+def test_stream_turn_releases_connection_during_claude_await(fresh_db, monkeypatch):
+    """Igual que record_turn pero por el streaming (/chat/stream), que puede durar más."""
+    db = database.SessionLocal()
+    try:
+        conv = get_or_create_conversation(db, "s_stream_release", "agencia", "web")
+
+        seen = {}
+
+        async def spy_stream(project, cfg, message, history):
+            seen["in_tx"] = db.in_transaction()
+            for d in ["a", "b"]:
+                yield d
+
+        monkeypatch.setattr(convsvc, "stream_ai_response", spy_stream)
+
+        async def drain():
+            async for _ in convsvc.stream_turn(db, conv, "hola"):
+                pass
+
+        asyncio.run(drain())
+        assert seen["in_tx"] is False
+    finally:
+        db.close()
+
+
 def test_concurrent_lead_creation_same_conversation_is_handled(fresh_db, monkeypatch):
     """Dos turnos casi simultáneos de la MISMA conversación, cada uno detectando un dato de
     contacto distinto: ambos ven conversation.lead is None y crean Lead(conversation_id=...).

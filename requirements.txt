@@ -4,7 +4,7 @@ uvicorn[standard]==0.32.0
 sqlalchemy==2.0.36
 alembic==1.18.4
 psycopg2-binary==2.9.10
-anthropic==0.116.0
+anthropic>=0.55
 httpx==0.28.0
 pydantic-settings==2.6.1
 python-dotenv==1.0.1

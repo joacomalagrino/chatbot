@@ -16,7 +16,7 @@ Se stubea Claude y Meta (no hay red). Cada test usa su propia sesión contra la 
 import asyncio
 
 import pytest
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 import database
 import models
@@ -427,6 +427,130 @@ def test_handle_lead_ad_releases_event_when_persist_fails(fresh_db, monkeypatch)
     c = _counts()
     assert c["leads"] == 0
     assert c["events"] == 0
+
+
+def test_handle_lead_ad_releases_event_when_commit_raises_non_integrity(fresh_db, monkeypatch):
+    """BUG 1 (ALTA): si el commit del Lead lanza algo que NO es IntegrityError —p.ej. un
+    OperationalError por pool timeout bajo ráfaga de campaña— el evento reclamado igual se
+    LIBERA. Antes el except era solo `IntegrityError`, así que un OperationalError propagaba
+    sin _release_event → el reintento de Meta veía el claim y descartaba un lead PAGO."""
+    async def fake_lead(leadgen_id):
+        return {"field_data": [{"name": "full_name", "values": ["Falla"]}]}
+
+    monkeypatch.setattr(webhook, "get_lead_data", fake_lead)
+    monkeypatch.setattr(webhook, "fire_hot_lead", lambda payload: None)
+
+    released = []
+    real_release = webhook._release_event
+
+    def spy_release(db, event_id):
+        released.append(event_id)
+        return real_release(db, event_id)
+
+    monkeypatch.setattr(webhook, "_release_event", spy_release)
+
+    # Igual que el test de IntegrityError, pero el commit del Lead lanza OperationalError.
+    db = database.SessionLocal()
+    original_commit = db.commit
+
+    def flaky_commit():
+        if any(isinstance(obj, models.Lead) for obj in db.new):
+            raise OperationalError("QueuePool limit", None, Exception("timeout"))
+        return original_commit()
+
+    db.commit = flaky_commit
+    try:
+        asyncio.run(webhook._handle_lead_ad(db, {"leadgen_id": "op1", "form_id": "F1"}))
+    finally:
+        db.commit = original_commit
+        db.close()
+
+    assert released == ["lead_op1"]
+    c = _counts()
+    assert c["leads"] == 0
+    assert c["events"] == 0
+
+
+def test_handle_lead_ad_releases_event_when_get_or_create_fails(fresh_db, monkeypatch):
+    """BUG 1 (ALTA): un fallo ANTES del commit (get_or_create_conversation, que estaba FUERA
+    del try) también libera el evento. Antes propagaba sin _release_event → claim quemado →
+    lead pago perdido para siempre."""
+    async def fake_lead(leadgen_id):
+        return {"field_data": [{"name": "full_name", "values": ["Falla GC"]}]}
+
+    monkeypatch.setattr(webhook, "get_lead_data", fake_lead)
+    monkeypatch.setattr(webhook, "fire_hot_lead", lambda payload: None)
+
+    def boom(*args, **kwargs):
+        raise OperationalError("pool checkout", None, Exception("QueuePool limit reached"))
+
+    monkeypatch.setattr(webhook, "get_or_create_conversation", boom)
+
+    db = database.SessionLocal()
+    try:
+        asyncio.run(webhook._handle_lead_ad(db, {"leadgen_id": "gc1", "form_id": "F1"}))
+    finally:
+        db.close()
+
+    # El evento reclamado por _claim_event quedó liberado pese a fallar antes del commit.
+    c = _counts()
+    assert c["leads"] == 0
+    assert c["events"] == 0
+
+
+def test_handle_change_releases_event_when_get_or_create_fails(fresh_db, monkeypatch):
+    """BUG 2 (WhatsApp): si get_or_create_conversation falla DESPUÉS del claim (p.ej. checkout
+    del pool bajo ráfaga), se libera el evento para que el reintento de Meta reprocese. Antes
+    get_or_create corría FUERA del try/except → claim quemado → inbound perdido en silencio."""
+    def boom(*args, **kwargs):
+        raise OperationalError("pool checkout", None, Exception("QueuePool limit reached"))
+
+    monkeypatch.setattr(webhook, "get_or_create_conversation", boom)
+
+    async def no_send(*a, **k):
+        raise AssertionError("no debería enviarse si falló la persistencia")
+
+    monkeypatch.setattr(webhook, "send_whatsapp_reply", no_send)
+
+    change = {
+        "field": "messages",
+        "value": {"messages": [{
+            "id": "wamid_gcfail", "type": "text",
+            "from": "5491100000000", "text": {"body": "hola"},
+        }]},
+    }
+    db = database.SessionLocal()
+    try:
+        asyncio.run(webhook._handle_change(db, change))
+    finally:
+        db.close()
+
+    # Reclamado por _claim_event pero liberado tras el fallo: nada persiste.
+    assert _counts() == {"conversations": 0, "messages": 0, "leads": 0, "events": 0}
+
+
+def test_handle_ig_event_releases_event_when_get_or_create_fails(fresh_db, monkeypatch):
+    """BUG 2 (Instagram): mismo contrato que WhatsApp pero por el canal de IG."""
+    def boom(*args, **kwargs):
+        raise OperationalError("pool checkout", None, Exception("QueuePool limit reached"))
+
+    monkeypatch.setattr(webhook, "get_or_create_conversation", boom)
+    monkeypatch.setattr(type(webhook.settings), "ig_account_map", lambda self: {})
+
+    async def no_send(*a, **k):
+        raise AssertionError("no debería enviarse si falló la persistencia")
+
+    monkeypatch.setattr(webhook, "send_instagram_message", no_send)
+
+    db = database.SessionLocal()
+    try:
+        asyncio.run(
+            webhook._handle_ig_event(db, _ig_event("USER_GCFAIL", "ACCT_X", mid="mid_gcfail"))
+        )
+    finally:
+        db.close()
+
+    assert _counts() == {"conversations": 0, "messages": 0, "leads": 0, "events": 0}
 
 
 # ───────────────────────── _claim_event: referencia fuerte a la purga ───────

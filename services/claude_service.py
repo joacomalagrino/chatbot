@@ -44,13 +44,23 @@ def _build_system_prompt(project_config: dict) -> str:
 
 
 def _normalize_messages(messages: list) -> list:
-    """Colapsa turnos consecutivos del mismo rol antes de mandar a Claude.
+    """Colapsa turnos consecutivos del mismo rol y garantiza que la secuencia arranque
+    con 'user' antes de mandar a Claude.
 
     Dos mensajes seguidos del mismo rol (p.ej. dos 'user' por un doble envío de
     WhatsApp, o un 'assistant' duplicado) degradan la conversación: la API los
     combina, pero el resultado queda implícito y desalineado con la alternancia
     user/assistant que el modelo espera. Acá los unimos explícitamente en un solo
     turno (concatenando el texto con un salto de línea) y descartamos los vacíos.
+
+    Además la API de Anthropic EXIGE que el primer mensaje sea 'user' (si no, 400). El
+    recorte a los últimos 20 (`history[-20:]` en el caller) puede dejar un 'assistant' al
+    principio cuando la alternancia se rompió antes —p.ej. el trade-off documentado de
+    duplicación del Message de usuario deja un turno sin respuesta → historial de largo
+    impar → la ventana de 20 arranca en 'assistant'—. Sin este recorte, ese 400 se traga
+    como FALLBACK y el lead recibe "problema técnico" turno tras turno hasta que el
+    'assistant' inicial sale de la ventana. Descartamos los 'assistant' iniciales; el caller
+    siempre agrega el 'user' entrante al final, así que nunca queda vacío.
     """
     normalized: list = []
     for msg in messages:
@@ -61,6 +71,8 @@ def _normalize_messages(messages: list) -> list:
             normalized[-1]["content"] = f"{normalized[-1]['content']}\n{content}"
         else:
             normalized.append({"role": msg["role"], "content": content})
+    while normalized and normalized[0]["role"] == "assistant":
+        normalized.pop(0)
     return normalized
 
 

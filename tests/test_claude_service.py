@@ -173,7 +173,9 @@ def test_collapses_consecutive_same_role_messages(monkeypatch):
 
 
 def test_collapses_consecutive_assistant_then_user(monkeypatch):
-    """El último mensaje (siempre user) se colapsa con un user previo del historial."""
+    """El último mensaje (siempre user) se colapsa con un user previo del historial.
+    El 'assistant' que quedaba al principio se descarta: la API exige que el primer
+    mensaje sea 'user' (ver test_drops_leading_assistant_messages)."""
     captured = _patch_create(monkeypatch, returns=FakeResponse([Block("text", "ok")]))
     history = [
         {"role": "assistant", "content": "Contame qué buscás."},
@@ -182,7 +184,6 @@ def test_collapses_consecutive_assistant_then_user(monkeypatch):
     _run(message="usada", history=history)
     sent = captured["messages"]
     assert sent == [
-        {"role": "assistant", "content": "Contame qué buscás."},
         {"role": "user", "content": "una SUV\nusada"},
     ]
 
@@ -191,12 +192,36 @@ def test_drops_empty_content_messages(monkeypatch):
     """Mensajes con content vacío se descartan (no rompen la alternancia)."""
     captured = _patch_create(monkeypatch, returns=FakeResponse([Block("text", "ok")]))
     history = [
-        {"role": "user", "content": ""},
-        {"role": "assistant", "content": "Hola"},
+        {"role": "user", "content": "hola"},
+        {"role": "assistant", "content": ""},      # vacío: se descarta
+        {"role": "assistant", "content": "buenas"},
     ]
     _run(message="che", history=history)
     sent = captured["messages"]
     assert sent == [
-        {"role": "assistant", "content": "Hola"},
+        {"role": "user", "content": "hola"},
+        {"role": "assistant", "content": "buenas"},
+        {"role": "user", "content": "che"},
+    ]
+
+
+def test_drops_leading_assistant_messages(monkeypatch):
+    """La API de Anthropic exige que el PRIMER mensaje sea 'user' (si no, 400). Cuando el
+    recorte a los últimos 20 deja un 'assistant' al principio —historial con la alternancia
+    rota por el trade-off de duplicación del Message de usuario— esos 'assistant' iniciales
+    se descartan. Sin esto, el 400 se tragaba como FALLBACK y el lead recibía "problema
+    técnico" turno tras turno hasta que el 'assistant' salía de la ventana. Regresión 2026-07-08."""
+    captured = _patch_create(monkeypatch, returns=FakeResponse([Block("text", "ok")]))
+    history = [
+        {"role": "assistant", "content": "vieja respuesta 1"},
+        {"role": "user", "content": "hola"},
+        {"role": "assistant", "content": "vieja respuesta 2"},
+    ]
+    _run(message="che", history=history)
+    sent = captured["messages"]
+    assert sent[0]["role"] == "user"           # nunca arranca con assistant
+    assert sent == [
+        {"role": "user", "content": "hola"},
+        {"role": "assistant", "content": "vieja respuesta 2"},
         {"role": "user", "content": "che"},
     ]

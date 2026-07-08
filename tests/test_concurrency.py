@@ -400,3 +400,107 @@ def test_concurrent_lead_creation_same_conversation_is_handled(fresh_db, monkeyp
         assert lead.phone == "1123456780"
     finally:
         db.close()
+
+
+def test_record_turn_releases_connection_during_claude_await(fresh_db, monkeypatch):
+    """RECURSO (bug "pool exhaustion autoinfligida"): durante el await largo a Claude,
+    record_turn NO debe retener la conexión de la Session.
+
+    Con pool 10+20, si cada turno sostiene su conexión checked-out e idle-in-transaction
+    durante los ~segundos que tarda Claude, una ráfaga de ~30 turnos concurrentes agota el
+    pool y el resto muere con "QueuePool limit ... reached" (señal #1, reproducida por el
+    loadtest). El fix soltó la conexión (db.commit()) tras armar el history y antes del await.
+
+    Este test fija el contrato de forma DETERMINISTA (sin timing real): mockeamos get_ai_response
+    y, MIENTRAS corre el await, verificamos que:
+      (1) la Session que llamó a record_turn ya cerró su transacción -> db.in_transaction() es
+          False (soltó la conexión). Antes del fix, la query de `history` dejaba una transacción
+          de lectura abierta y esto era True durante todo el await;
+      (2) se puede sacar y USAR otra conexión del pool en paralelo (prueba de humo del recurso).
+    Y que el turno se persiste igual (respuesta + Message del asistente), o sea que soltar la
+    conexión no cambió el comportamiento observable.
+    """
+    db = database.SessionLocal()
+    conv = get_or_create_conversation(db, "web_await", "agencia", "web")
+    observed = {}
+
+    async def probe_ai(project, project_config, message, history):
+        # Durante el await: la Session de record_turn NO debe estar en transacción.
+        observed["in_transaction"] = db.in_transaction()
+        # Y el pool debe poder entregar OTRA conexión para trabajar en paralelo.
+        other = database.SessionLocal()
+        try:
+            other.query(models.Conversation).count()
+            observed["other_ok"] = True
+        finally:
+            other.close()
+        return "respuesta ok"
+
+    monkeypatch.setattr(convsvc, "get_ai_response", probe_ai)
+
+    resp = asyncio.run(convsvc.record_turn(db, conv, "hola"))
+    db.close()
+
+    assert observed.get("in_transaction") is False, (
+        "record_turn retuvo la conexión (transacción abierta) durante el await a Claude"
+    )
+    assert observed.get("other_ok") is True
+    assert resp == "respuesta ok"
+
+    check = database.SessionLocal()
+    try:
+        # El turno se persistió igual: mensaje del usuario + respuesta del asistente.
+        assert (
+            check.query(models.Message)
+            .filter(models.Message.role == "assistant", models.Message.content == "respuesta ok")
+            .count()
+            == 1
+        )
+        assert check.query(models.Message).filter(models.Message.role == "user").count() == 1
+    finally:
+        check.close()
+
+
+def test_stream_turn_releases_connection_during_claude_await(fresh_db, monkeypatch):
+    """Mismo contrato de recurso que record_turn pero para stream_turn: la conexión se suelta
+    ANTES de empezar a iterar el stream (el commit va antes del async for). Verifica que durante
+    el stream la Session no está en transacción y que otra conexión del pool queda disponible,
+    y que el Message del asistente se persiste con el texto acumulado en el finally."""
+    db = database.SessionLocal()
+    conv = get_or_create_conversation(db, "web_stream_await", "agencia", "web")
+    observed = {}
+
+    async def probe_stream(project, project_config, message, history):
+        observed["in_transaction"] = db.in_transaction()
+        other = database.SessionLocal()
+        try:
+            other.query(models.Conversation).count()
+            observed["other_ok"] = True
+        finally:
+            other.close()
+        yield "respuesta ok"
+
+    monkeypatch.setattr(convsvc, "stream_ai_response", probe_stream)
+
+    async def drain():
+        return [delta async for delta in convsvc.stream_turn(db, conv, "hola")]
+
+    chunks = asyncio.run(drain())
+    db.close()
+
+    assert observed.get("in_transaction") is False, (
+        "stream_turn retuvo la conexión (transacción abierta) durante el await al stream"
+    )
+    assert observed.get("other_ok") is True
+    assert chunks == ["respuesta ok"]
+
+    check = database.SessionLocal()
+    try:
+        assert (
+            check.query(models.Message)
+            .filter(models.Message.role == "assistant", models.Message.content == "respuesta ok")
+            .count()
+            == 1
+        )
+    finally:
+        check.close()

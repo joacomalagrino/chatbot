@@ -77,11 +77,25 @@ async def record_turn(db: Session, conversation: Conversation, text: str) -> str
     recent.reverse()
     history = [{"role": m.role, "content": m.content} for m in recent]
 
-    response_text = await get_ai_response(
-        conversation.project, PROJECTS[conversation.project], text, history
-    )
+    # Capturar en locales TODO lo que el await necesita ANTES de soltar la conexión. Tras el
+    # db.commit() de abajo, expire_on_commit=True (default) deja `conversation` con los atributos
+    # expirados: volver a leer conversation.project / .id dispararía un re-SELECT que sacaría una
+    # conexión del pool JUSTO antes del await (y la sostendría durante él, anulando el fix). El
+    # `history` ya es una lista de dicts materializada en memoria, no depende más de la sesión.
+    project = conversation.project
+    project_config = PROJECTS[project]
+    conversation_id = conversation.id
 
-    db.add(Message(conversation_id=conversation.id, role="assistant", content=response_text))
+    # Soltar la conexión al pool DURANTE el await a Claude (hasta ~60s). El commit cierra la
+    # transacción de lectura que dejó abierta la query de `recent`, así la Session devuelve su
+    # conexión al pool en vez de quedar checked-out e idle-in-transaction mientras esperamos.
+    # Bajo ráfaga (webhooks concurrentes) esto es lo que evita agotar el pool 10+20 y que el
+    # resto muera con "QueuePool limit ... reached" (señal #1). El próximo acceso saca una nueva.
+    db.commit()
+
+    response_text = await get_ai_response(project, project_config, text, history)
+
+    db.add(Message(conversation_id=conversation_id, role="assistant", content=response_text))
     db.commit()
 
     update_lead_from_message(db, conversation, text)
@@ -112,11 +126,20 @@ async def stream_turn(db: Session, conversation: Conversation, text: str):
     recent.reverse()
     history = [{"role": m.role, "content": m.content} for m in recent]
 
+    # Mismo patrón de recurso que record_turn: capturar en locales lo que el stream necesita y
+    # soltar la conexión al pool ANTES de empezar a iterar el async for (el await del stream
+    # también dura ~segundos). Tras el commit, expire_on_commit=True expira `conversation`; leer
+    # conversation.project / .id dispararía un re-SELECT que retomaría una conexión justo antes
+    # del await. El commit va acá (antes del async for); el bloque finally de persistencia queda igual.
+    project = conversation.project
+    project_config = PROJECTS[project]
+    conversation_id = conversation.id
+
+    db.commit()
+
     parts = []
     try:
-        async for delta in stream_ai_response(
-            conversation.project, PROJECTS[conversation.project], text, history
-        ):
+        async for delta in stream_ai_response(project, project_config, text, history):
             parts.append(delta)
             yield delta
     finally:
@@ -126,7 +149,7 @@ async def stream_turn(db: Session, conversation: Conversation, text: str):
         response_text = "".join(parts)
         if response_text:
             db.add(
-                Message(conversation_id=conversation.id, role="assistant", content=response_text)
+                Message(conversation_id=conversation_id, role="assistant", content=response_text)
             )
             db.commit()
             update_lead_from_message(db, conversation, text)

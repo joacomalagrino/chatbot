@@ -23,6 +23,10 @@
     --bg: #15171c; --card: #1f2228; --text: #e8eaed; --muted: #9aa0a6; --border: #2d3139;
     --shadow: 0 1px 3px rgba(0,0,0,.4);
     --st-new-bg: #1a2740; --st-contacted-bg: #3a2c10; --st-qualified-bg: #14301f; --st-lost-bg: #2a2e36;
+    /* Los FONDOS de estado se oscurecían pero el TEXTO seguía siendo el de light (azul/verde/ámbar
+       oscuros) → chips, números de stat y delta quedaban en 2,1–2,9:1 sobre el fondo oscuro (AA pide
+       4,5). Estos tonos claros dan 5,2–9,7:1 y mantienen la familia de color de cada estado. */
+    --st-new: #8ab4f8; --st-contacted: #fdd663; --st-qualified: #81c995; --st-lost: #9aa0a6;
     --search-cancel-filter: invert(.7);
   }
 }

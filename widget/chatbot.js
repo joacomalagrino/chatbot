@@ -120,7 +120,8 @@
     #cb-header .cb-titles { display: flex; flex-direction: column; justify-content: center; min-width: 0; }
     #cb-header .cb-title { font-weight: 600; font-size: 15px; line-height: 1.25;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    #cb-header .cb-subtitle { font-size: 12px; opacity: .85; line-height: 1.3;
+    /* Sin opacidad: con .85 el blanco sobre el azul del header daba 3,70:1 (AA pide 4,5 en 12px). */
+    #cb-header .cb-subtitle { font-size: 12px; opacity: 1; line-height: 1.3;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     #cb-close {
       margin-left: auto; flex-shrink: 0; background: none; border: none;
@@ -265,10 +266,13 @@
     launcherEl = document.createElement('button');
     launcherEl.id = 'cb-launcher';
     launcherEl.innerHTML = LAUNCHER_ICON;
-    launcherEl.setAttribute('aria-label', 'Abrir chat');
+    // El badge es un punto rojo sin texto: para el lector el aviso va en el nombre del launcher.
+    launcherEl.setAttribute('aria-label', 'Abrir chat (1 mensaje nuevo)');
     launcherEl.setAttribute('aria-expanded', 'false');
+    launcherEl.setAttribute('aria-controls', 'cb-panel');
     var badge = document.createElement('span');
     badge.id = 'cb-badge';
+    badge.setAttribute('aria-hidden', 'true');
     launcherEl.appendChild(badge);
     root.appendChild(launcherEl);
 
@@ -287,7 +291,7 @@
       </div>
       <div id="cb-messages" role="log" aria-live="polite" aria-atomic="false"></div>
       <div id="cb-quick"></div>
-      <div id="cb-channels">
+      <div id="cb-channels" role="region" aria-label="Continuar por otro canal" aria-live="polite">
         <p>¿Continuamos por otro canal?</p>
         ${WHATSAPP_NUMBER ? `<a class="cb-channel-btn wa" id="cb-wa-btn" href="#" target="_blank" rel="noopener">${WA_ICON} Continuar por WhatsApp</a>` : ''}
         ${INSTAGRAM_USER ? `<a class="cb-channel-btn ig" id="cb-ig-btn" href="https://ig.me/m/${encodeURIComponent(INSTAGRAM_USER)}" target="_blank" rel="noopener">${IG_ICON} Continuar por Instagram</a>` : ''}
@@ -389,8 +393,12 @@
     addMessage('bot', welcomes[PROJECT] || welcomes.agencia);
   }
 
-  function scrollToBottom(el) {
-    el.scrollTo({ top: el.scrollHeight, behavior: REDUCED_MOTION ? 'auto' : 'smooth' });
+  // ¿el usuario está mirando el final? Si subió a leer, no lo tironeamos al fondo.
+  function isNearBottom(el) {
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  }
+  function scrollToBottom(el, instant) {
+    el.scrollTo({ top: el.scrollHeight, behavior: (instant || REDUCED_MOTION) ? 'auto' : 'smooth' });
   }
 
   function addMessage(role, text) {
@@ -431,8 +439,15 @@
     var div = document.createElement('div');
     div.className = 'cb-typing';
     div.id = 'cb-typing';
-    div.setAttribute('aria-label', 'Escribiendo…');
     div.innerHTML = '<span></span><span></span><span></span>';
+    // El live region (#cb-messages) anuncia el TEXTO de lo insertado; los 3 spans son decorativos y
+    // un aria-label sobre un div sin rol no se expone de forma fiable. Con un texto visualmente
+    // oculto (estilos inline, para no depender del CSS del sitio host) el lector sí avisa que el bot
+    // está por responder. .cb-typing es flex → el nodo absolute no altera los puntitos.
+    var sr = document.createElement('span');
+    sr.textContent = 'Escribiendo…';
+    sr.style.cssText = 'position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap';
+    div.appendChild(sr);
     messages.appendChild(div);
     scrollToBottom(messages);
   }
@@ -452,6 +467,10 @@
     if (quick) quick.innerHTML = '';
     input.value = '';
     document.getElementById('cb-send').disabled = true;
+    // Enviar desde un chip BORRA el chip que tenía el foco, y deshabilitar #cb-send también suelta
+    // el suyo: en ambos casos el foco caía a <body>, fuera del diálogo, y el focus-trap (anclado en
+    // el panel) dejaba de atrapar el Tab. Lo devolvemos al input, que además es donde se sigue.
+    input.focus();
     // Guardamos el texto antes del fetch: si la red falla no se pierde (item Reintentar).
     var lastText = text;
     addMessage('user', text);
@@ -505,6 +524,10 @@
         var messages = document.getElementById('cb-messages');
         bubble = document.createElement('div');
         bubble.className = 'cb-msg bot';
+        // La burbuja crece token a token DENTRO del live region (#cb-messages, role=log aria-live):
+        // cada mutación re-anunciaría el texto parcial (lectura entrecortada). La ocultamos al lector
+        // mientras streamea y la revelamos al 'done', para que se anuncie una sola vez y completa.
+        bubble.setAttribute('aria-hidden', 'true');
         messages.appendChild(bubble);
       }
 
@@ -514,10 +537,14 @@
         if (data.error) throw new Error('stream error');
         if (data.delta != null) {
           ensureBubble();
+          var messages = document.getElementById('cb-messages');
+          var stick = isNearBottom(messages);   // medir ANTES de que crezca la burbuja
           acc += data.delta;
           // Mientras llega, mostramos texto plano creciendo (sin linkify, que se aplica al final).
           bubble.textContent = acc;
-          scrollToBottom(document.getElementById('cb-messages'));
+          // 'smooth' por token encolaba una animación de scroll por delta (jank). Instantáneo, y
+          // solo si el usuario está mirando el final: si subió a leer, no lo tironeamos.
+          if (stick) scrollToBottom(messages, true);
         } else if (data.done) {
           gotDone = true;
           suggest = !!data.suggest_channels;
@@ -539,7 +566,8 @@
             // Si no llegó ni un delta ni el done, el stream no sirvió → fallback.
             if (!gotDone && acc === '') throw new Error('stream vacío');
             // Al final aplicamos el linkify seguro sobre el texto completo (igual que addMessage).
-            if (bubble) bubble.innerHTML = linkify(acc);
+            // Revelamos ANTES de escribir el contenido final: así el live region lo anuncia una vez.
+            if (bubble) { bubble.removeAttribute('aria-hidden'); bubble.innerHTML = linkify(acc); }
             else { removeTyping(); addMessage('bot', acc || 'Lo siento, hubo un error. Intentá de nuevo.'); }
             if (suggest) showChannelSuggestions();
             sending = false;

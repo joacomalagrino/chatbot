@@ -58,6 +58,9 @@
 
     document.getElementById('api-label').textContent = window.CHATBOT_API_URL;
   </script>
-  <script src="chatbot.js"></script>
+  <!-- defer: no bloquea el parseo. El <script> inline de arriba corre antes igual, así que la
+       config (window.CHATBOT_*) ya está lista cuando el widget arranca. Este snippet es el que
+       copian los sitios cliente. -->
+  <script src="chatbot.js" defer></script>
 </body>
 </html>

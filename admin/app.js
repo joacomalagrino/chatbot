@@ -214,7 +214,7 @@
     }).join('');
 
     content.innerHTML = '<div class="muted leads-count">' + leads.length + ' lead' + (leads.length > 1 ? 's' : '') + '</div>' +
-      '<div class="table-scroll"><table><thead><tr><th>Lead</th><th>Contacto</th><th>Estado</th><th>Cambiar</th><th>Fecha</th><th>Conversación</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+      '<div class="table-scroll"><table><thead><tr><th scope="col">Lead</th><th scope="col">Contacto</th><th scope="col">Estado</th><th scope="col">Cambiar</th><th scope="col">Fecha</th><th scope="col">Conversación</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
 
     // Toggle notas al click en la fila (sin disparar al usar el select o el botón de conversación).
     content.querySelectorAll('.lead-row.clickable').forEach(function (row) {
@@ -366,7 +366,11 @@
     results.innerHTML = '<div class="grid">' + variants + '</div>' + aud;
     results.querySelectorAll('.copy-btn').forEach(function (b) {
       b.addEventListener('click', function () {
-        navigator.clipboard.writeText(b.dataset.copy).then(function () { toast('Copiado'); });
+        // Sin .catch, un fallo (contexto no seguro, permiso denegado) quedaba en silencio: el usuario
+        // creía haber copiado y pegaba lo anterior.
+        navigator.clipboard.writeText(b.dataset.copy)
+          .then(function () { toast('Copiado'); })
+          .catch(function () { toast('No se pudo copiar — copialo a mano'); });
       });
     });
   }

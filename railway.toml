@@ -17,6 +17,11 @@ builder = "NIXPACKS"
 # confirmados se deja parametrizable por entorno (FORWARDED_ALLOW_IPS) SIN cambiar el
 # comportamiento actual por default: si la variable no está seteada, cae en '*' (lo de hoy).
 # Seteá FORWARDED_ALLOW_IPS con los CIDRs del edge en el entorno de Railway para cerrar el agujero.
+#
+# ALTERNATIVA (independiente de este CIDR, no publicado por Railway): keyear el rate-limit por
+# el RIGHTMOST del X-Forwarded-For, que el edge de Railway appendea = el cliente real y NO es
+# spoofeable en *.up.railway.app. Se habilita con RATE_LIMIT_IP_SOURCE=xff_rightmost (ver
+# ratelimit.py: default seguro, opt-in, con la advertencia de NO usarlo si hay un CDN propio delante).
 startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips=\"${FORWARDED_ALLOW_IPS:-*}\""
 healthcheckPath = "/health"
 restartPolicyType = "ON_FAILURE"

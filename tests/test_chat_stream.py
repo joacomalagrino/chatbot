@@ -126,6 +126,42 @@ def test_stream_emits_error_frame_on_failure(client, monkeypatch):
     assert not any("delta" in f for f in frames)
 
 
+def test_stream_logs_pool_exhaustion_on_failure(client, monkeypatch):
+    """Si el turno de /chat/stream muere por saturación del pool, ahora la contabilizamos IGUAL
+    que el path no-streaming (mismo helper/firma): antes el `except` la tragaba y, como el cuerpo
+    del stream corre DESPUÉS del endpoint, el pool_exhaustion_observer de main.py nunca la veía —
+    monitoreo ciego en el camino por defecto del widget. La respuesta al cliente NO cambia
+    (sigue el 200 + frame {"error": true})."""
+    import observability
+    from sqlalchemy.exc import TimeoutError as PoolTimeoutError
+
+    observability.reset_pool_exhaustion_count()
+    observability.clear_errors()
+
+    async def boom(project, project_config, message, history):
+        raise PoolTimeoutError("QueuePool limit of size 10 overflow 20 reached")
+        yield  # pragma: no cover — marca la función como async generator
+
+    monkeypatch.setattr(convsvc, "stream_ai_response", boom)
+    status, _, frames = _read_frames(
+        client, {"session_id": "pool1", "project": "agencia", "message": "hola"}
+    )
+
+    # Respuesta al cliente sin cambios: 200 + frame de error, sin deltas.
+    assert status == 200
+    assert any(f.get("error") for f in frames)
+    assert not any("delta" in f for f in frames)
+
+    # Y ahora SÍ queda registrada para el monitoreo, con el path del stream.
+    assert observability.pool_exhaustion_count() == 1
+    pool_errs = [e for e in observability.recent_errors() if e["context"] == "db.pool_exhausted"]
+    assert len(pool_errs) == 1
+    assert pool_errs[0]["details"]["path"] == "/chat/stream"
+
+    observability.reset_pool_exhaustion_count()
+    observability.clear_errors()
+
+
 def test_stream_persists_when_client_disconnects_midway(monkeypatch):
     """C2: si el cliente se desconecta a mitad del stream (GeneratorExit lanzado en el
     yield), el Message del asistente con lo generado hasta ese punto y el update del lead

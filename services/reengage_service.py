@@ -22,7 +22,11 @@ from sqlalchemy.orm import Session
 from config import get_settings
 from models import Conversation
 from observability import record_error
-from services.meta_service import is_within_24h_window, send_whatsapp_template
+from services.meta_service import (
+    WHATSAPP_WINDOW,
+    is_within_24h_window,
+    send_whatsapp_template,
+)
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -55,9 +59,20 @@ def find_reengageable_conversations(
     """
     now = now or _utcnow()
 
-    # Filtros baratos en SQL (canal/teléfono/idempotencia/opt-out). La ventana se evalúa en
-    # Python con is_within_24h_window para reusar EXACTAMENTE la misma lógica que el resto
-    # (incluido last_inbound_at IS NULL = cerrada).
+    # `closing_within`: además de las ya cerradas, incluir las que cerrarán dentro de ese
+    # margen. Se simula adelantando el reloj: si la ventana estará cerrada en (now + margen),
+    # ya es elegible. Sin margen, solo cuentan las que están cerradas AHORA.
+    horizon = now + closing_within if closing_within else now
+
+    # Ventana empujada al SQL para no traer TODA la tabla y filtrar en Python (era O(total)).
+    # is_within_24h_window(t) == (horizon - t) < WHATSAPP_WINDOW (estricto), con None = cerrada.
+    # Su negación (= elegible) es, exactamente: t IS NULL OR (horizon - t) >= WHATSAPP_WINDOW,
+    # o sea t <= horizon - WHATSAPP_WINDOW. El `<=` replica el `<` estricto del helper en el
+    # BORDE: a exactamente 24h la ventana ya está cerrada (elegible), a 24h menos un instante
+    # sigue abierta (no elegible). El `.limit(limit)` acota el batch en la propia query.
+    cutoff = horizon - WHATSAPP_WINDOW
+
+    # Filtros baratos en SQL (canal/teléfono/idempotencia/opt-out + ventana + límite).
     candidates = (
         db.query(Conversation)
         .filter(
@@ -69,16 +84,19 @@ def find_reengageable_conversations(
                 Conversation.reengage_opt_out.is_(None),
                 Conversation.reengage_opt_out.is_(False),
             ),
+            or_(
+                Conversation.last_inbound_at.is_(None),
+                Conversation.last_inbound_at <= cutoff,
+            ),
         )
         .order_by(Conversation.last_inbound_at.asc())
+        .limit(limit)
         .all()
     )
 
-    # `closing_within`: además de las ya cerradas, incluir las que cerrarán dentro de ese
-    # margen. Se simula adelantando el reloj: si la ventana estará cerrada en (now + margen),
-    # ya es elegible. Sin margen, solo cuentan las que están cerradas AHORA.
-    horizon = now + closing_within if closing_within else now
-
+    # Backstop en Python (defensa en profundidad): reusa is_within_24h_window para garantizar
+    # equivalencia exacta con el resto del código aunque el predicado SQL se toque. Con el filtro
+    # ya en SQL esto es un no-op salvo regresión; el `[:limit]` queda redundante con .limit(limit).
     eligible = [
         c for c in candidates if not is_within_24h_window(c.last_inbound_at, now=horizon)
     ]

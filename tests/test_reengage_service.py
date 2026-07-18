@@ -250,6 +250,49 @@ def test_closing_within_margin_includes_soon_to_close(db, sends, enable):
     assert len(soon) == 1
 
 
+def test_window_filter_pushdown_matches_python_at_boundary(db, sends, enable):
+    """El filtro de ventana empujado al SQL es EXACTAMENTE equivalente al filtro Python,
+    incluido el BORDE. is_within_24h_window usa `<` estricto: a exactamente 24h la ventana ya
+    está cerrada (elegible); un instante antes sigue abierta (no elegible); last_inbound_at NULL
+    cuenta como cerrada (elegible). Si alguien cambia el `<=` del SQL por `<`, o toca el helper,
+    este test rompe — es el que fija la equivalencia."""
+    # Borde exacto: last_inbound_at == NOW - 24h  → ventana cerrada → elegible.
+    on_edge = _mk_conv(db, phone="5490000000024", hours_ago=24, session_id="edge")
+    # Un segundo DENTRO de la ventana (23h59m59s desde NOW) → abierta → NO elegible.
+    inside = models.Conversation(
+        project="agencia",
+        session_id="inside",
+        channel="whatsapp",
+        contact_phone="5490000000023",
+        last_inbound_at=NOW - timedelta(hours=24) + timedelta(seconds=1),
+    )
+    db.add(inside)
+    # Sin inbound (NULL) → cerrada (fail-safe) → elegible.
+    no_inbound = _mk_conv(db, phone="5490000000000", hours_ago=None, session_id="null")
+    db.commit()
+
+    eligible = reengage.find_reengageable_conversations(db, now=NOW)
+    ids = {c.id for c in eligible}
+    assert on_edge.id in ids  # borde (== 24h) incluido
+    assert no_inbound.id in ids  # NULL incluido
+    assert inside.id not in ids  # un instante dentro de la ventana, excluido
+    assert len(eligible) == 2
+
+
+def test_limit_is_applied_and_returns_oldest_first(db, sends, enable):
+    """El .limit(limit) acota el batch en la propia query (no trae todo y recorta en Python) y
+    respeta el orden last_inbound_at asc = los inbound más viejos primero."""
+    for h in (26, 40, 30):
+        _mk_conv(db, phone=f"549{h:02d}00000000", hours_ago=h, session_id=f"lim-{h}")
+
+    eligible = reengage.find_reengageable_conversations(db, now=NOW, limit=2)
+
+    assert len(eligible) == 2
+    # ASC por last_inbound_at → los más viejos (40h, 30h) primero; el de 26h queda afuera.
+    hours = [round((NOW - c.last_inbound_at).total_seconds() / 3600) for c in eligible]
+    assert hours == [40, 30]
+
+
 def test_non_whatsapp_and_no_phone_excluded(db, sends, enable):
     _mk_conv(db, channel="instagram", phone="iguser", hours_ago=30, session_id="ig")
     _mk_conv(db, channel="whatsapp", phone=None, hours_ago=30, session_id="nophone")

@@ -8,8 +8,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from config import PROJECTS
-from database import SessionLocal, get_db
+from database import SessionLocal, get_db, is_pool_exhaustion
 from models import Message
+from observability import log_pool_exhaustion
 from ratelimit import limiter
 from services.conversation_service import (
     get_or_create_conversation,
@@ -111,8 +112,16 @@ async def chat_stream(request: Request, payload: ChatRequest):
 
             suggest = _should_suggest_channels(db, conversation.id)
             yield f"data: {json.dumps({'done': True, 'suggest_channels': suggest})}\n\n"
-        except Exception:
+        except Exception as exc:
             logger.exception("Error en /chat/stream")
+            # El cuerpo del stream corre DESPUÉS de que el endpoint retornó, así que la
+            # saturación del pool que se lanza acá NO pasa por el pool_exhaustion_observer
+            # (main.py) —el except la traga antes—. Y /chat/stream es el path por DEFECTO del
+            # widget: sin este log el monitoreo quedaría ciego justo en el camino más usado.
+            # Contabilizamos IGUAL que el path no-streaming (mismo helper/firma) sin cambiar la
+            # respuesta al cliente.
+            if is_pool_exhaustion(exc):
+                log_pool_exhaustion(exc, path=request.url.path, method=request.method)
             yield f"data: {json.dumps({'error': True})}\n\n"
         finally:
             db.close()
